@@ -1,0 +1,23 @@
+name: hisinet_test
+channels:
+  - conda-forge
+  - defaults
+
+dependencies:
+  # Conda‑managed packages:
+  - python==3.12.0
+  - numpy>=1.18.0
+  - scipy>=1.5.2
+  - frozendict
+  - cython
+  - scikit-image
+  - seaborn
+  - ipykernel
+  - jupyter
+  # Install your package (setup.py) via pip in editable mode
+  - pip
+  - pip:
+    - torch
+    - torchvision 
+    - cooler
+    - hic-straw
