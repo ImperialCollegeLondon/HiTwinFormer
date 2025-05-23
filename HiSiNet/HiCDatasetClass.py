@@ -160,7 +160,7 @@ class GroupedHiCDataset(HiCDataset):
 
 class SiameseHiCDataset(HiCDataset):
     """Paired Hi-C datasets by genomic location."""
-    def __init__(self, list_of_HiCDatasets, sims=(0,1), reference = reference_genomes["mm9"], triplet):
+    def __init__(self, list_of_HiCDatasets, triplet, sims=(0,1), reference = reference_genomes["mm9"]):
         self.triplet = triplet #if using triplet loss data should be created differently
         self.sims = sims
         self.reference, self.chromsizes = reference
