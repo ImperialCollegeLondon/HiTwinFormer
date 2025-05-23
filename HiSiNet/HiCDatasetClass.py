@@ -16,7 +16,7 @@ import torch
 
 class HiCDataset(Dataset):
     """Hi-C dataset."""
-    def __init__(self, metadata, data_res, resolution, stride=8, exclude_chroms=['chrY','chrX', 'Y', 'X', 'chrM', 'M'], reference = 'mm9'):
+    def __init__(self, metadata, data_res, resolution, stride=8, exclude_chroms=['chrY','chrX', 'Y', 'X', 'chrM', 'M'], reference = 'mm9', normalise = True):
         """
         Args:
         metadata: A list consisting of
@@ -32,6 +32,7 @@ class HiCDataset(Dataset):
         self.reference, self.data_res, self.resolution, self.stride_length,  self.pixel_size = reference, data_res, resolution, int(resolution/stride), int(resolution/data_res)
         self.metadata = {'filename': metadata[0], 'replicate': metadata[1], 'norm': metadata[2], 'type_of_bin': metadata[3], 'class_id': metadata[4], 'chromosomes': OrderedDict()}
         self.positions = []
+        self.normalise = normalise
         self.exclude_chroms = exclude_chroms +['All', 'ALL', 'all'] 
         self.data = []
 
@@ -66,9 +67,8 @@ class HiCDataset(Dataset):
 
 class HiCDatasetDec(HiCDataset):
     """Hi-C dataset loader using hicstraw.HiCFile interface. Creates image tiles for each chromosomes"""
-    def __init__(self, normalise, *args, **kwargs):
+    def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.normalise=normalise
         # open .hic file
         hic = hicstraw.HiCFile(self.metadata['filename'])
         # build chromosome size map

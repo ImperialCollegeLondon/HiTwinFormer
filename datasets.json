@@ -1,0 +1,32 @@
+{
+  "control": {
+    "reference": "mm9",
+    "training": [
+      "/home/tt920/mnt/scratch/tt920/mlhic/train_CD69negDPWTR3.mlhic",
+      "/home/tt920/mnt/scratch/tt920/mlhic/train_CD69negDPWTR4.mlhic"
+    ],
+    "validation": [
+      "/home/tt920/mnt/scratch/tt920/mlhic/val_CD69negDPWTR3_chr18.mlhic",
+      "/home/tt920/mnt/scratch/tt920/mlhic/val_CD69negDPWTR4_chr18.mlhic"
+    ],
+    "test": [
+      "/home/tt920/mnt/scratch/tt920/mlhic/test_CD69negDPWTR3_chr2.mlhic",
+      "/home/tt920/mnt/scratch/tt920/mlhic/test_CD69negDPWTR4_chr2.mlhic"
+    ]
+  },
+  "KO": {
+    "reference": "mm9",
+    "training": [
+      "/home/tt920/mnt/scratch/tt920/mlhic/train_CD69negDPPaxip1KOR1.mlhic",
+      "/home/tt920/mnt/scratch/tt920/mlhic/train_CD69negDPPaxip1KOR2.mlhic"
+    ],
+    "validation": [
+      "/home/tt920/mnt/scratch/tt920/mlhic/val_CD69negDPPaxip1KOR1_chr18.mlhic",
+      "/home/tt920/mnt/scratch/tt920/mlhic/val_CD69negDPPaxip1KOR2_chr18.mlhic"
+    ],
+    "test": [
+      "/home/tt920/mnt/scratch/tt920/mlhic/test_CD69negDPPaxip1KOR1_chr2.mlhic",
+      "/home/tt920/mnt/scratch/tt920/mlhic/test_CD69negDPPaxip1KOR2_chr2.mlhic"
+    ]
+  }
+}
