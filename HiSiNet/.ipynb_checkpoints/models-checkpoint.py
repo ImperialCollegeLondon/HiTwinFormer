@@ -6,9 +6,9 @@ import numpy as np
 #learn f(x) such that x is the wt and f(x) is the CTCFKO - then i have to clean and label in a different way.
 #or x is the CTCFKO and f(x) is the DKO
 class LastLayerNN(nn.Module):
-    def __init__(self):
+    def __init__(self, triplet=False):
         super(LastLayerNN, self).__init__()
-        self.net = nn.Sequential(nn.Linear(83, 2),
+        self.net = nn.Sequential(nn.LazyLinear(2),
             nn.GELU(),
             nn.Softmax(dim=-1),
             )
@@ -16,42 +16,63 @@ class LastLayerNN(nn.Module):
         return self.net(x1-x2)
 
 class SiameseNet(nn.Module):
-    def __init__(self, mask=False):
+    def __init__(self, mask=False, image_size=224, triplet=False, supcon=False):
         super(SiameseNet, self).__init__()
+        self.triplet = triplet
+        self.supcon = supcon
         if mask:
-            mask = np.tril(np.ones(256), k=-3)+np.triu(np.ones(256), k=3)
-            self.mask = nn.Parameter(torch.tensor([mask], dtype=torch.int32), requires_grad = False)
+            mask = np.tril(np.ones(image_size), k=-3)+np.triu(np.ones(image_size), k=3)
+            self.mask = nn.Parameter(torch.tensor(np.array(mask), dtype=torch.int32), requires_grad = False)
     def mask_data(self, x):
         if hasattr(self, "mask"): x=torch.mul(self.mask, x)
         return x
     def forward_one(self, x):
         raise NotImplementedError
-    def forward(self, x1, x2):
-        x1, x2 = self.mask_data(x1), self.mask_data(x2)
-        out1 = self.forward_one(x1)
-        out2 = self.forward_one(x2)
-        return out1, out2
+    def forward(self, x1, x2, x3=None):
+        if self.triplet: # for triplet loss
+            x1, x2, x3 = self.mask_data(x1), self.mask_data(x2), self.mask_data(x3)
+            out1 = self.forward_one(x1)
+            out2 = self.forward_one(x2)
+            out3 = self.forward_one(x3)
+            return out1, out2, out3
+        elif self.supcon:
+            pass
+        else: # for regular contrastive loss
+            x1, x2 = self.mask_data(x1), self.mask_data(x2)
+            out1 = self.forward_one(x1)
+            out2 = self.forward_one(x2)
+            return out1, out2
 
 class SLeNet(SiameseNet):
-    def __init__(self, *args, **kwargs):
-        super(SLeNet, self).__init__(*args, **kwargs)
+    def __init__(self, *args, mask=False, image_size=224, triplet=False, supcon=False):
+        super().__init__(mask=mask, image_size=image_size, triplet=triplet, supcon=supcon)
         self.features = nn.Sequential(
-            nn.Conv2d(1, 6, 5, 1),
-            nn.MaxPool2d(2, stride=2),
-            nn.Conv2d(6, 16, 5, 1),
-            nn.MaxPool2d(2, stride=2),
+            nn.Conv2d(1,6,5,1),
+            nn.MaxPool2d(2,2),
+            nn.Conv2d(6,16,5,1),
+            nn.MaxPool2d(2,2),
         )
+
+        # infer the “flattened” feature dim 
+        with torch.no_grad():
+            # create a dummy batch of size=1
+            dummy = torch.zeros((1,)+(1,image_size,image_size))
+            feat = self.features(dummy)
+            feat_dim = int(feat.view(1, -1).size(1))
+
+        # now build a fully-specified linear head
         self.linear = nn.Sequential(
-            nn.Dropout(p=0.5, inplace=True),
-            nn.Linear(16*61*61, 120),
+            nn.Dropout(0.5),
+            nn.Linear(feat_dim, 120),
             nn.GELU(),
             nn.Linear(120, 83),
             nn.GELU(),
-            )
+        )
         self.distance = nn.CosineSimilarity()
+
     def forward_one(self, x):
         x = self.features(x)
-        x = x.view(x.size()[0], -1)
+        x = x.view(x.size(0), -1)
         x = self.linear(x)
         return x
 
@@ -166,58 +187,65 @@ class SZFNet(SiameseNet):
 
 import torch
 import torch.nn as nn
+#from maxvit.maxvit_tiny import maxvit_t
 from torchvision.models import maxvit_t, MaxVit_T_Weights
+
 
 class MaxVitEmbedder(nn.Module):
     def __init__(self):
         super().__init__()
-        # 1) Load the pretrained MaxViT-Tiny
-        base = maxvit_t(weights=MaxVit_T_Weights.IMAGENET1K_V1)
-        
-        # 2) Reuse its stem and transformer blocks
-        self.stem   = base.stem            # initial Conv2dNormActivation layers
-        self.blocks = base.blocks          # ModuleList of MaxVitBlock stages
-        
-        # 3) Reuse its classification head’s pooling+flatten+norm
-        #    base.classifier is: [AdaptiveAvgPool2d, Flatten, LayerNorm, Linear, Tanh, Linear]
-        self.pool    = base.classifier[0]  # AdaptiveAvgPool2d(1)
-        self.flatten = base.classifier[1]  # Flatten()
-        self.norm    = base.classifier[2]  # LayerNorm(512)
-        
-        # 4) We drop everything after the norm (i.e. the Linear+Tanh+Linear)
-        #    The embedding dimension is simply the LayerNorm’s size:
-        self.embedding_dim = self.norm.normalized_shape[0]  # == 512
+        base = maxvit_t(weights=None)
+        self.stem = base.stem
+        self.blocks = base.blocks
+        self.pool = base.classifier[0]  # AdaptiveAvgPool2d
+        self.flatten = base.classifier[1]  # Flatten
+        self.norm = base.classifier[2]  # LayerNorm
+        self.embedding_dim = self.norm.normalized_shape[0]
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.stem(x)                # → (B, C0, H0, W0)
-        for block in self.blocks:
-            x = block(x)                # → (B, C_last, H_last, W_last)
-        x = self.pool(x)                # → (B, C_last, 1, 1)
-        x = self.flatten(x)             # → (B, C_last)
-        x = self.norm(x)                # → (B, 512)
-        return x                        # your embedding vector
+    def forward(self, x):
+        # Print the shape of x at the start
+        #print("Shape of x at start:", x.shape)
 
-# ————— Usage —————
+        x = self.stem(x)
+        #print("Shape of x after stem:", x.shape)
 
-# Move to GPU and eval mode
-model = MaxVitEmbedder().cuda().eval()
+        for i, block in enumerate(self.blocks):
+            x = block(x)
+            #print(f"Shape of x after block {i}:", x.shape)
 
-# Dummy inference
-x = torch.randn(8, 3, 224, 224, device='cuda')
-with torch.no_grad():
-    embeddings = model(x)
-print("Embedding shape:", embeddings.shape)  # torch.Size([8, 512])
+        x = self.pool(x)
+        #print("Shape of x after pool:", x.shape)
+
+        x = self.flatten(x)
+        #print("Shape of x after flatten:", x.shape)
+
+        x = self.norm(x)
+        #print("Shape of x after norm:", x.shape)
+
+        return x  # (B, 512)
+
+
+class SMaxVit(SiameseNet):
+    """Siamese network using MaxViT transformer backbone without projection head."""
+    def __init__(self, mask=False):
+        super().__init__(mask=mask)
+        self.embedder = MaxVitEmbedder()
+
+    def forward_one(self, x):
+        # Repeat single-channel to 3 if needed (make into color essentially)
+        if x.shape[1] == 1:
+            x = x.repeat(1, 3, 1, 1)
+        return self.embedder(x)  # returns (B, 512)
 
 class MaxViTMultiScaleEmbedder(nn.Module):
     """
     A MaxViT‑Tiny backbone that returns a concatenated embedding
     of pooled features from each of its 4 transformer blocks.
     """
-    def __init__(self, pretrained: bool = True, embed_dim: int | None = None):
+    def __init__(embed_dim: int | None = None):
         super().__init__()
         # 1) Load base model
-        weights = MaxVit_T_Weights.IMAGENET1K_V1 if pretrained else None
-        base = maxvit_t(weights=weights)
+        base = maxvit_t(weights=None)
 
         # 2) Reuse stem + blocks
         self.stem   = base.stem            # initial conv layers
@@ -259,11 +287,11 @@ class MaxViTMultiScaleEmbedder(nn.Module):
         emb = self.projector(multiscale)      # (B, output_dim)
         return emb
 
-model = MaxViTMultiScaleEmbedder(pretrained=True, embed_dim=256).cuda().eval()
-print("Output dim:", model.output_dim)   # 256
+#model = MaxViTMultiScaleEmbedder(pretrained=True, embed_dim=256).cuda().eval()
+#print("Output dim:", model.output_dim)   # 256
 
-x = torch.randn(8, 3, 224, 224, device='cuda')
-with torch.no_grad():
-    out = model(x)
-print("Multiscale embedding shape:", out.shape)  # torch.Size([8, 256])
+#x = torch.randn(8, 3, 224, 224, device='cuda')
+#with torch.no_grad():
+   # out = model(x)
+#print("Multiscale embedding shape:", out.shape)  # torch.Size([8, 256])
 
