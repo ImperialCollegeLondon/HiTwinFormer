@@ -13,6 +13,8 @@ import hicstraw
 import cooler
 from scipy import ndimage
 import torch
+from collections import defaultdict
+from itertools import combinations
 
 class HiCDataset(Dataset):
     """Hi-C dataset."""
@@ -32,6 +34,7 @@ class HiCDataset(Dataset):
         self.reference, self.data_res, self.resolution, self.stride_length,  self.pixel_size = reference, data_res, resolution, int(resolution/stride), int(resolution/data_res)
         self.metadata = {'filename': metadata[0], 'replicate': metadata[1], 'norm': metadata[2], 'type_of_bin': metadata[3], 'class_id': metadata[4], 'chromosomes': OrderedDict()}
         self.positions = []
+        self.chrom_pos = []
         self.normalise = normalise
         self.exclude_chroms = exclude_chroms +['All', 'ALL', 'all'] 
         self.data = []
@@ -88,6 +91,7 @@ class HiCDatasetDec(HiCDataset):
         # freeze data structures
         self.data = tuple(self.data)
         self.positions = tuple(self.positions)
+        self.chrom_pos = tuple(self.chrom_pos)
         self.metadata = frozendict(self.metadata)
 
     def add_chromosome(self, chromosome):
@@ -112,11 +116,16 @@ class HiCDatasetDec(HiCDataset):
         # slide window across stride length to create multiple zoomed hi-c tiles
         for start in range(0, chrom_length, self.stride_length):
             end = min(start + self.resolution - self.data_res, chrom_length) # The end has -self.data_res because otherwise getRecordsAsMatrix would create a matrix of pixel_size+1
+            if end - start < self.resolution - self.data_res:  # this is a truncated window at the tail — skip it
+                continue
             mat = mzd.getRecordsAsMatrix(start, end, start, end)
             img = self._process_matrix(mat) # Here we process the Hi-C matrix
+            image_exists = (img is not None)
+            self.chrom_pos.append((chrom, chrom_length, start, image_exists))
             if img is not None:
                 self.data.append((img, self.metadata['class_id'])) # store image and related class
                 self.positions.append(start) # store start position
+
 
         # store indices for this chromosome
         key = chrom[3:] if chrom.startswith("chr") else chrom
@@ -160,12 +169,14 @@ class GroupedHiCDataset(HiCDataset):
 
 class SiameseHiCDataset(HiCDataset):
     """Paired Hi-C datasets by genomic location."""
-    def __init__(self, list_of_HiCDatasets, triplet, sims=(0,1), reference = reference_genomes["mm9"]):
+    def __init__(self, list_of_HiCDatasets, triplet=False, supcon=False, sims=(0,1), reference = reference_genomes["mm9"]):
         self.triplet = triplet #if using triplet loss data should be created differently
+        self.supcon = supcon
         self.sims = sims
         self.reference, self.chromsizes = reference
         self.data =[]
         self.positions =[]
+        self.pos = []
         self.labels = []
         self.chromosomes = OrderedDict()
         checks = self.check_input(list_of_HiCDatasets)
@@ -195,12 +206,12 @@ class SiameseHiCDataset(HiCDataset):
         curr_data: list of (image, class_label) for a single genomic coordinate
         pos: genomic coordinate
         """
+            
         if self.triplet:
             # Group samples by their class label
             by_label = defaultdict(list)
             for idx, (img, lbl) in enumerate(curr_data):
                 by_label[lbl].append((idx, img))
-
             # For each class that has at least 2 samples, form anchor–positive pairs,
             # then for each such pair, pair with all negatives from other classes.
             for lbl, samples in by_label.items():
@@ -212,7 +223,7 @@ class SiameseHiCDataset(HiCDataset):
                     # negatives = samples in *other* classes
                     for other_lbl, other_samples in by_label.items():
                         if other_lbl == lbl:
-                            continue
+                            continue # ensure negative is not from the same label
                         for k, img_k in other_samples:
                             # two triplets: (i anchor, j positive, k negative) and vice versa
                             self.data.append((img_i, img_j, img_k))
@@ -222,6 +233,33 @@ class SiameseHiCDataset(HiCDataset):
                             self.data.append((img_j, img_i, img_k))
                             self.positions.append(pos)
                             self.labels.append((j, i, k))
+        elif self.supcon:
+            from collections import defaultdict
+
+            by_label = defaultdict(list)
+            for img, lbl in curr_data:
+                by_label[lbl].append(img)
+
+            # require at least one view in both groups
+            if 0 not in by_label or 1 not in by_label:
+                return
+
+            control_list = by_label[0]  # list of all images with label=0
+            treat_list = by_label[1]    # list of all images with label=1
+
+            # stack them into two tensors:
+            #    control_tensor  shape: [n_control, C, H, W]
+            #    treatment_tensor shape: [n_treatment, C, H, W]
+            control_tensor = torch.stack(control_list, dim=0)
+            treatment_tensor = torch.stack(treat_list, dim=0)
+            tile_loss_info   = torch.stack([control_tensor, treatment_tensor], dim=0)
+            #print(tile_loss_info)
+            # store them as one data‐entry
+            self.data.append((tile_loss_info))
+            # no need for self.labels in supcon mode
+            self.labels.append(None)
+            self.positions.append(pos)
+                    
       
         else: # For regular contrastive loss
             self.data.extend([(curr_data[k][0], curr_data[j][0], (self.sims[0] if curr_data[k][1] == curr_data[j][1] else self.sims[1]) ) for k in range(0,len(curr_data)) for j in range(k+1,len(curr_data))]) # Loop through pairs of data
@@ -238,7 +276,8 @@ class SiameseHiCDataset(HiCDataset):
 
     def make_data(self, list_of_HiCDatasets):
         datasets = len(list_of_HiCDatasets)
-        for chrom in self.chromsizes.keys(): # For each chromosme
+        
+        for chrom in self.chromsizes.keys(): # For each chromosome
             start_index = len(self.positions) # starts at 0 
             starts, positions = [], [] # Start indexes and positions (say index 1, 1000bp)
             for i in range(0, datasets): # For each dataset
@@ -251,8 +290,9 @@ class SiameseHiCDataset(HiCDataset):
                     if positions[i][-1:]!=[pos]: continue # If the last start position in [positions] doesn't match pos in the last position, then skip it.
                     curr_data.append(list_of_HiCDatasets[i][starts[i]+len(positions[i])-1] ) # Grab the relevant tile and class ID and add to current data 
                     positions[i].pop() # Remove last index position from positions list and continue loop to match positions[-1:] to pos
+                self.pos.append((pos, chrom))
                 self.append_data(curr_data, pos) # Now, once all instances of the same start position is found from each dataset being compared, create pairs of data at that position
-            self.chromosomes[chrom] =(start_index,len(self.positions)) # start index to end index (self.positions has new number of positions after append_data)
+            self.chromosomes[chrom] = (start_index,len(self.positions)) # start index to end index (self.positions has new number of positions after append_data)
         self.data = tuple(self.data) # Fixed data now
 
 class HiCDatasetCool(HiCDataset):
