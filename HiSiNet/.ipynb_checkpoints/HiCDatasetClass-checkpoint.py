@@ -438,6 +438,7 @@ class PairOfDatasets(SiameseHiCDataset):
         return all_maps_grouped
     
 class Augmentations:
+    """Data augmentation class for ML training. Only realistic augmentations are applied, which include poisson and random dropout"""
     def __init__(self):
         pass
 
@@ -503,10 +504,9 @@ class Augmentations:
     
     @staticmethod
     def normalize(matrix):
-        """Normalize tensor or numpy array to [0, 1] by dividing by max."""
+        """Normalize batch of tensors to [0, 1] by dividing by max."""
         if torch.is_tensor(matrix):
-            max_val = torch.max(matrix)
-            return matrix / max_val if max_val > 0 else matrix
+            max_vals = batch.amax(dim=(1,2,3), keepdim=True)
+            return matrix / max_vals 
         else:
-            max_val = np.max(matrix)
-            return matrix / max_val if max_val > 0 else matrix
+            raise TypeError("Input must be a PyTorch tensor")

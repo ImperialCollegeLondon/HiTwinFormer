@@ -1,4 +1,5 @@
 import numpy as np
+import random
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -104,24 +105,22 @@ for epoch in range(1, args.epoch_training + 1):
 
     if loss_function=="contrastive":
         for batch_idx, (x1, x2, labels) in enumerate(train_loader):
+            if args.n_aug > 0:
+                x1_aug_list, x2_aug_list, labels_aug_list = [], [], []
 
-            x1_aug_list, x2_aug_list, labels_aug_list = [], [], []
-
-            if n_aug > 0:
                 for i in range(x1.shape[0]):
                     for _ in range(args.n_aug):
-                        x1_aug_list.append(augmentor.normalize(augmentor(x1[i])))
-                        x2_aug_list.append(augmentor.normalize(augmentor(x2[i])))
+                        x1_aug_list.append(augmentor(x1[i]))
+                        x2_aug_list.append(augmentor(x2[i]))
                         labels_aug_list.append(labels[i])
 
-                x1 = torch.stack(x1_aug_list).to(cuda)
-                x2 = torch.stack(x2_aug_list).to(cuda)
-                labels = torch.tensor(labels_aug_list).to(cuda)
-            else:
-                x1 = torch.stack([augmentor.normalize(x) for x in x1]).to(cuda)
-                x2 = torch.stack([augmentor.normalize(x) for x in x2]).to(cuda)
-                labels = labels.to(cuda)
-    
+                x1 = torch.stack(x1_aug_list)
+                x2 = torch.stack(x2_aug_list)
+                labels = torch.tensor(labels_aug_list)
+            x1 = augmentor.normalize(x1).to(cuda)
+            x2 = augmentor.normalize(x2).to(cuda)    
+            labels = labels.to(cuda)
+
             with torch.autocast(device_type='cuda'):
                 feat1, feat2 = model(x1, x2)
                 logits = nn_model(feat1, feat2)
@@ -140,23 +139,24 @@ for epoch in range(1, args.epoch_training + 1):
             torch.cuda.empty_cache()
             
    
+    
     elif loss_function == "triplet":
         for batch_idx, (x1, x2, x3) in enumerate(train_loader):
-            if n_aug > 0:
+            if args.n_aug > 0:
                 x1_aug_list, x2_aug_list, x3_aug_list = [], [], []
                 for i in range(x1.shape[0]):
-                    for _ in range(arg.n_aug):
-                        x1_aug_list.append(augmentor.normalize(augmentor(x1[i])))
-                        x2_aug_list.append(augmentor.normalize(augmentor(x2[i])))
-                        x3_aug_list.append(augmentor.normalize(augmentor(x3[i])))
+                    for _ in range(args.n_aug):
+                        x1_aug_list.append(augmentor(x1[i]))
+                        x2_aug_list.append(augmentor(x2[i]))
+                        x3_aug_list.append(augmentor(x3[i]))
 
-                x1 = torch.stack(x1_aug_list).to(cuda)
-                x2 = torch.stack(x2_aug_list).to(cuda)
-                x3 = torch.stack(x3_aug_list).to(cuda)
-            else:
-                x1 = torch.stack([augmentor.normalize(x) for x in x1]).to(cuda)
-                x2 = torch.stack([augmentor.normalize(x) for x in x2]).to(cuda)
-                x3 = torch.stack([augmentor.normalize(x) for x in x3]).to(cuda)
+                x1 = torch.stack(x1_aug_list)
+                x2 = torch.stack(x2_aug_list)
+                x3 = torch.stack(x3_aug_list)
+
+            x1 = augmentor.normalize(x1).to(cuda)
+            x2 = augmentor.normalize(x2).to(cuda)
+            x3 = augmentor.normalize(x3).to(cuda)
 
             with torch.autocast(device_type='cuda'):
                 feat1, feat2, feat3 = model(x1, x2, x3)
@@ -181,7 +181,7 @@ for epoch in range(1, args.epoch_training + 1):
             batch_loss = 0
             for tile in batch:
                 control=[]
-                treatment[]
+                treatment=[]
                 views, labels = tile
                 for i, lab in enumerate(labels):
                     if lab==0:
@@ -208,14 +208,18 @@ for epoch in range(1, args.epoch_training + 1):
     with torch.no_grad():
         if loss_function=="contrastive":
             for x1, x2, labels in val_loader:
-                x1, x2, labels = x1.to(cuda), x2.to(cuda), labels.to(cuda).float()
+                x1 = augmentor.normalize(x1).to(cuda)
+                x2 = augmentor.normalize(x2).to(cuda)
+                labels = labels.to(cuda).float()
                 with torch.autocast(device_type='cuda'):
                     feat1, feat2 = model(x1, x2)
                     val_contrastive_loss += contrastive_loss_fn(feat1, feat2, labels).item()
                 torch.cuda.empty_cache()
         elif loss_function=="triplet":
             for x1, x2, x3 in val_loader:
-                x1, x2, x3 = x1.to(cuda), x2.to(cuda), x3.to(cuda)
+                x1 = augmentor.normalize(x1).to(cuda)
+                x2 = augmentor.normalize(x2).to(cuda)
+                x3 = augmentor.normalize(x3).to(cuda)
                 with torch.autocast(device_type='cuda'):
                     feat1, feat2, feat3 = model(x1, x2, x3)
                     val_contrastive_loss += triplet_loss_fn(feat1, feat2, feat3).item()
