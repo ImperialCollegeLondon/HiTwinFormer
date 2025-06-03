@@ -18,7 +18,7 @@ from itertools import combinations
 
 class HiCDataset(Dataset):
     """Hi-C dataset."""
-    def __init__(self, metadata, data_res, resolution, stride=8, exclude_chroms=['chrY','chrX', 'Y', 'X', 'chrM', 'M'], reference = 'mm9', normalise = True):
+    def __init__(self, metadata, data_res, resolution, stride=8, exclude_chroms=['chrY','chrX', 'Y', 'X', 'chrM', 'M'], reference = 'mm9', normalise = False):
         """
         Args:
         metadata: A list consisting of
@@ -436,3 +436,77 @@ class PairOfDatasets(SiameseHiCDataset):
         all_maps = self.make_maps_base(chromosome, diagonal_off=diagonal_off)
         all_maps_grouped = self.make_maps_grouped(all_maps)
         return all_maps_grouped
+    
+class Augmentations:
+    def __init__(self):
+        pass
+
+    def __call__(self, matrix):
+        rand = random.randrange(3)
+        if rand == 0:
+            augmented = matrix
+        elif rand == 1:
+            augmented = self.poisson_resample(matrix)
+        else:
+            augmented = self.random_dropout(matrix)
+
+        return augmented
+
+    @staticmethod
+    def poisson_resample(matrix, normalize_total=True):
+        if torch.is_tensor(matrix):
+            lower_triangle = torch.tril(matrix)
+            aug = torch.poisson(lower_triangle)
+            diag = torch.diag(torch.diag(aug))
+            transformed = aug + aug.T - diag
+
+            if normalize_total:
+                orig_sum = matrix.sum()
+                new_sum = transformed.sum()
+                if new_sum > 0:
+                    transformed *= (orig_sum / new_sum)
+
+        else:
+            lower_triangle = np.tril(matrix)
+            aug = np.random.poisson(lam=lower_triangle).astype(np.float32)
+            diag = np.diag(np.diag(aug))
+            transformed = aug + aug.T - diag
+
+            if normalize_total:
+                orig_sum = matrix.sum()
+                new_sum = transformed.sum()
+                if new_sum > 0:
+                    transformed *= (orig_sum / new_sum)
+
+        return transformed
+
+    @staticmethod
+    def random_dropout(matrix, dropout_lower_bound=0.025, dropout_upper_bound=0.075):
+        dropout = random.uniform(dropout_lower_bound, dropout_upper_bound)
+
+        if torch.is_tensor(matrix):
+            matrix = matrix.clone()
+            non_zero = torch.nonzero(matrix, as_tuple=False)
+            n = int(dropout * non_zero.size(0))
+            if n > 0:
+                chosen = non_zero[torch.randperm(non_zero.size(0))[:n]]
+                matrix[chosen[:, 0], chosen[:, 1]] = 0
+        else:
+            matrix = matrix.copy()
+            non_zero = np.flatnonzero(matrix)
+            n = int(dropout * len(non_zero))
+            if n > 0:
+                chosen = np.random.choice(non_zero, n, replace=False)
+                matrix.flat[chosen] = 0
+
+        return matrix
+    
+    @staticmethod
+    def normalize(matrix):
+        """Normalize tensor or numpy array to [0, 1] by dividing by max."""
+        if torch.is_tensor(matrix):
+            max_val = torch.max(matrix)
+            return matrix / max_val if max_val > 0 else matrix
+        else:
+            max_val = np.max(matrix)
+            return matrix / max_val if max_val > 0 else matrix
