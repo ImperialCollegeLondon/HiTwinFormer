@@ -11,10 +11,10 @@ from skimage.morphology import convex_hull_image
 from scipy import ndimage
 import hicstraw
 import cooler
-from scipy import ndimage
 import torch
 from collections import defaultdict
 from itertools import combinations
+import random
 
 class HiCDataset(Dataset):
     """Hi-C dataset."""
@@ -201,7 +201,7 @@ class SiameseHiCDataset(HiCDataset):
         pass
 
 
-    def append_data(self, curr_data, pos):
+    def append_data(self, curr_data, pos, chrom):
         """
         curr_data: list of (image, class_label) for a single genomic coordinate
         pos: genomic coordinate
@@ -233,33 +233,37 @@ class SiameseHiCDataset(HiCDataset):
                             self.data.append((img_j, img_i, img_k))
                             self.positions.append(pos)
                             self.labels.append((j, i, k))
-        elif self.supcon:
-            from collections import defaultdict
 
+        elif self.supcon:
+
+
+            # 1) bucket images by label
             by_label = defaultdict(list)
             for img, lbl in curr_data:
                 by_label[lbl].append(img)
-
-            # require at least one view in both groups
-            if 0 not in by_label or 1 not in by_label:
-                return
-
-            control_list = by_label[0]  # list of all images with label=0
-            treat_list = by_label[1]    # list of all images with label=1
-
-            # stack them into two tensors:
-            #    control_tensor  shape: [n_control, C, H, W]
-            #    treatment_tensor shape: [n_treatment, C, H, W]
-            control_tensor = torch.stack(control_list, dim=0)
-            treatment_tensor = torch.stack(treat_list, dim=0)
-            tile_loss_info   = torch.stack([control_tensor, treatment_tensor], dim=0)
-            #print(tile_loss_info)
-            # store them as one data‐entry
-            self.data.append((tile_loss_info))
-            # no need for self.labels in supcon mode
-            self.labels.append(None)
+        
+            # 2) require at least 2 of each
+            if len(by_label[0]) < 2 or len(by_label[1]) < 2:
+                return  # skip this tile
+        
+            # 3) flatten both classes in one go
+            #    tiles  = [ all imgs of cls0, then all imgs of cls1 ]
+            #    labs   = [ 0 repeated len(cls0) , 1 repeated len(cls1) ]
+            tiles, labs = zip(*(
+                (img, lbl)
+                for lbl in (0, 1)
+                for img in by_label[lbl]
+            ))
+        
+            # 4) stack into tensors
+            tile_tensor  = torch.stack(tiles, dim=0)            # [n_views, C, H, W]
+            label_tensor = torch.tensor(labs, dtype=torch.long) # [n_views]
+        
+            # 5) append just like the other branches
+            self.data.append((tile_tensor, label_tensor))
             self.positions.append(pos)
-                    
+            self.pos.append((pos, chrom))
+                            
       
         else: # For regular contrastive loss
             self.data.extend([(curr_data[k][0], curr_data[j][0], (self.sims[0] if curr_data[k][1] == curr_data[j][1] else self.sims[1]) ) for k in range(0,len(curr_data)) for j in range(k+1,len(curr_data))]) # Loop through pairs of data
@@ -272,6 +276,7 @@ class SiameseHiCDataset(HiCDataset):
             #        self.data.append((img_k, img_j, label))
 
             self.positions.extend( [pos for k in range(0,len(curr_data)) for j in range(k+1,len(curr_data))]) # add position # list to [positions] for number of pairs of data created
+            self.pos.extend([(pos, chrom) for k in range(0,len(curr_data)) for j in range(k+1,len(curr_data))])
             self.labels.extend( [( k, j) for k in range(0,len(curr_data)) for j in range(k+1,len(curr_data))]) # add labels list to [labels] of which pairs are being compared 
 
     def make_data(self, list_of_HiCDatasets):
@@ -290,8 +295,7 @@ class SiameseHiCDataset(HiCDataset):
                     if positions[i][-1:]!=[pos]: continue # If the last start position in [positions] doesn't match pos in the last position, then skip it.
                     curr_data.append(list_of_HiCDatasets[i][starts[i]+len(positions[i])-1] ) # Grab the relevant tile and class ID and add to current data 
                     positions[i].pop() # Remove last index position from positions list and continue loop to match positions[-1:] to pos
-                self.pos.append((pos, chrom))
-                self.append_data(curr_data, pos) # Now, once all instances of the same start position is found from each dataset being compared, create pairs of data at that position
+                self.append_data(curr_data, pos, chrom) # Now, once all instances of the same start position is found from each dataset being compared, create pairs of data at that position
             self.chromosomes[chrom] = (start_index,len(self.positions)) # start index to end index (self.positions has new number of positions after append_data)
         self.data = tuple(self.data) # Fixed data now
 
@@ -337,7 +341,6 @@ class HiCDatasetCool(HiCDataset):
         self.data.append((image_scp, self.metadata['class_id']))
         self.positions.append( int(self.data_res*(start_pos-first)))
         
-
 class PairOfDatasets(SiameseHiCDataset):
     """Paired Hi-C datasets by genomic location to create feature map."""
     def __init__(self, list_of_HiCDatasets, model, **kwargs):
@@ -438,75 +441,65 @@ class PairOfDatasets(SiameseHiCDataset):
         return all_maps_grouped
     
 class Augmentations:
-    """Data augmentation class for ML training. Only realistic augmentations are applied, which include poisson and random dropout"""
+    """Data augmentation class for ML training. Only realistic augmentations are applied, which include poisson and random dropout. Takes in 3D tensor (1, H, W)"""
     def __init__(self):
         pass
 
-    def __call__(self, matrix):
-        rand = random.randrange(3)
-        if rand == 0:
-            augmented = matrix
-        elif rand == 1:
-            augmented = self.poisson_resample(matrix)
-        else:
-            augmented = self.random_dropout(matrix)
+    def __call__(self, matrix, force_augmentation=False):
+        if force_augmentation == True:
+            rand = random.randrange(2)
+            if rand == 0:
+                augmented = self.poisson_resample(matrix)
+            else:
+                augmented = self.random_dropout(matrix)
+    
+        else:  
+            rand = random.randrange(3)
+            if rand == 0:
+                augmented = matrix
+            elif rand == 1:
+                augmented = self.poisson_resample(matrix)
+            else:
+                augmented = self.random_dropout(matrix)
 
         return augmented
 
     @staticmethod
     def poisson_resample(matrix, normalize_total=True):
         if torch.is_tensor(matrix):
-            lower_triangle = torch.tril(matrix)
+            matrix_2d = matrix.squeeze(0).clone()
+            lower_triangle = torch.tril(matrix_2d)
             aug = torch.poisson(lower_triangle)
             diag = torch.diag(torch.diag(aug))
             transformed = aug + aug.T - diag
-
             if normalize_total:
-                orig_sum = matrix.sum()
+                orig_sum = matrix_2d.sum()
                 new_sum = transformed.sum()
                 if new_sum > 0:
                     transformed *= (orig_sum / new_sum)
-
-        else:
-            lower_triangle = np.tril(matrix)
-            aug = np.random.poisson(lam=lower_triangle).astype(np.float32)
-            diag = np.diag(np.diag(aug))
-            transformed = aug + aug.T - diag
-
-            if normalize_total:
-                orig_sum = matrix.sum()
-                new_sum = transformed.sum()
-                if new_sum > 0:
-                    transformed *= (orig_sum / new_sum)
-
-        return transformed
+                    
+        return transformed.unsqueeze(0)
 
     @staticmethod
     def random_dropout(matrix, dropout_lower_bound=0.025, dropout_upper_bound=0.075):
+        
         dropout = random.uniform(dropout_lower_bound, dropout_upper_bound)
 
         if torch.is_tensor(matrix):
-            matrix = matrix.clone()
-            non_zero = torch.nonzero(matrix, as_tuple=False)
+            matrix_2d = matrix.squeeze(0).clone()
+            non_zero = torch.nonzero(matrix_2d, as_tuple=False)
             n = int(dropout * non_zero.size(0))
             if n > 0:
                 chosen = non_zero[torch.randperm(non_zero.size(0))[:n]]
-                matrix[chosen[:, 0], chosen[:, 1]] = 0
-        else:
-            matrix = matrix.copy()
-            non_zero = np.flatnonzero(matrix)
-            n = int(dropout * len(non_zero))
-            if n > 0:
-                chosen = np.random.choice(non_zero, n, replace=False)
-                matrix.flat[chosen] = 0
+                matrix_2d[chosen[:, 0], chosen[:, 1]] = 0
 
-        return matrix
+        return matrix_2d.unsqueeze(0)
     
     @staticmethod
     def normalize(matrix):
-        """Normalize batch of tensors to [0, 1] by dividing by max."""
+        """Normalize batch of tensors (B,C,H,W) to [0, 1] by dividing by max."""
         if torch.is_tensor(matrix):
-            max_vals = batch.amax(dim=(1,2,3), keepdim=True)
+            max_vals = matrix.amax(dim=(1,2,3), keepdim=True)
             return matrix / max_vals 
         else:
             raise TypeError("Input must be a PyTorch tensor")
