@@ -349,10 +349,11 @@ class PairOfDatasets(SiameseHiCDataset):
         self.pixel_size = int(self.resolution/self.data_res)
         self.paired_maps = {chromosome: self.make_maps(chromosome) for chromosome in self.chromosomes.keys()} 
         
-    def append_data(self, curr_data, pos):
+    def append_data(self, curr_data, pos, chrom): # Replaces old append_data in siamese class
         self.data.extend([(self.model.features(curr_data[k][0].unsqueeze(0)).detach().numpy() - self.model.features(curr_data[j][0].unsqueeze(0)).detach().numpy())[0]  for k in range(0,len(curr_data)) for j in range(k+1,len(curr_data))])
         self.positions.extend( [pos for k in range(0,len(curr_data)) for j in range(k+1,len(curr_data))])
         self.labels.extend( [( k, j) for k in range(0,len(curr_data)) for j in range(k+1,len(curr_data))])
+        self.pos.extend([(pos, chrom) for k in range(0,len(curr_data)) for j in range(k+1,len(curr_data))])
         
     def make_maps_base(self, chromosome, diagonal_off=4):
         nfilter = self.model.features[-2].out_channels
