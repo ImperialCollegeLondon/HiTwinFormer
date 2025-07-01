@@ -227,8 +227,8 @@ class MaxVitEmbedder(nn.Module):
 
 class SMaxVit(SiameseNet):
     """Siamese network using MaxViT transformer backbone without projection head."""
-    def __init__(self, mask=False):
-        super().__init__(mask=mask)
+    def __init__(self, mask=False, image_size=224, triplet=False, supcon=False):
+        super().__init__(mask=mask, image_size=image_size, triplet=triplet, supcon=supcon)
         self.embedder = MaxVitEmbedder()
 
     def forward_one(self, x):

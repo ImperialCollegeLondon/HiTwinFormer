@@ -344,13 +344,42 @@ class HiCDatasetCool(HiCDataset):
 class PairOfDatasets(SiameseHiCDataset):
     """Paired Hi-C datasets by genomic location to create feature map."""
     def __init__(self, list_of_HiCDatasets, model, **kwargs):
+        reference = kwargs.pop("reference", reference_genomes["mm9"]) # make mm9 default reference
+        # 2) Store your model
         self.model = model
-        super(PairOfDatasets, self).__init__(list_of_HiCDatasets, **kwargs)
+        # 3) Call SiameseHiCDataset.__init__:
+        super(PairOfDatasets, self).__init__(
+            list_of_HiCDatasets,
+            reference=reference
+        )
         self.pixel_size = int(self.resolution/self.data_res)
-        self.paired_maps = {chromosome: self.make_maps(chromosome) for chromosome in self.chromosomes.keys()} 
+        self.paired_maps = {
+            chrom: self.make_maps(chrom)
+            for chrom in self.chromosomes.keys()
+        }
         
     def append_data(self, curr_data, pos, chrom): # Replaces old append_data in siamese class
-        self.data.extend([(self.model.features(curr_data[k][0].unsqueeze(0)).detach().numpy() - self.model.features(curr_data[j][0].unsqueeze(0)).detach().numpy())[0]  for k in range(0,len(curr_data)) for j in range(k+1,len(curr_data))])
+        data_list = []
+# curr_data is a list of (img_tensor, class_id)
+        for i in range(len(curr_data)):
+            img_i, ci = curr_data[i]
+            for j in range(i+1, len(curr_data)):
+                img_j, cj = curr_data[j]
+    
+                # compute feature difference
+                if ci != cj:
+                    # control − KO
+                    if ci == 1 and cj == 0:
+                        diff = self.model.features(img_i.unsqueeze(0)) - self.model.features(img_j.unsqueeze(0)) # Creates 16 channel 224 x 224 differential feature map
+                    else:
+                        diff = self.model.features(img_j.unsqueeze(0)) - self.model.features(img_i.unsqueeze(0))
+                else:
+                    # same class
+                    diff = self.model.features(img_i.unsqueeze(0)) - self.model.features(img_j.unsqueeze(0))
+    
+                data_list.append(diff.detach().cpu().numpy()[0])
+
+        self.data.extend(data_list)
         self.positions.extend( [pos for k in range(0,len(curr_data)) for j in range(k+1,len(curr_data))])
         self.labels.extend( [( k, j) for k in range(0,len(curr_data)) for j in range(k+1,len(curr_data))])
         self.pos.extend([(pos, chrom) for k in range(0,len(curr_data)) for j in range(k+1,len(curr_data))])
@@ -361,7 +390,7 @@ class PairOfDatasets(SiameseHiCDataset):
         if (chrom_index2==chrom_index1): return None
         dims = (nfilter, self.pixel_size , int((self.positions[chrom_index1])/self.data_res) + self.pixel_size)
         pair_maps = {}
-        dataset_dims=(self.pixel_size ,self.pixel_size)
+        dataset_dims=(self.pixel_size, self.pixel_size)
 
         for (map1,map2) in [(j,i) for j in range(0,len(self.metadata)) for i in range(j+1,len(self.metadata))]:
             pair_maps[(map1,map2)] = {}
@@ -372,14 +401,18 @@ class PairOfDatasets(SiameseHiCDataset):
             true_ind=ind-1
             for curr_filt in range(0, nfilter):
                 x = self.data[true_ind][curr_filt]
-                x = (x+np.transpose(x))/2
+                x = (x+np.transpose(x))/2 # Not sure if needed...
                 x = np.multiply(x,(np.tril(np.ones(x.shape[0]), -diagonal_off)+np.triu(np.ones(x.shape[1]), k=diagonal_off)))
-                rotated = self.ndimage.rotate(x, angle=45, reshape=True)
+                rotated = ndimage.rotate(x, angle=45, reshape=True)
                 #if np.all(np.isnan(rotated )): return None 
                 rotated = resize(rotated, dataset_dims)
-                pair_maps[self.labels[true_ind]]["rotated_shapes"][curr_filt, :, int(self.positions[true_ind]/self.data_res):int((self.positions[true_ind]+self.resolution)/self.data_res)]+=rotated
+                pair_maps[self.labels[true_ind]]["rotated_shapes"][curr_filt, :, int(self.positions[true_ind]/self.data_res):int((self.positions[true_ind]+self.resolution)/self.data_res)]+=rotated 
                 pair_maps[self.labels[true_ind]]["norm"][curr_filt, :,int(self.positions[true_ind]/self.data_res):int((self.positions[true_ind]+self.resolution)/self.data_res)]+=1
-       
+
+        # places rotated extracted feature tile on a canvas for each chromosome. For each pair_maps, get a nested dictionary for each unique tile pairing that contains this info: {
+#    "rotated_shapes": np.zeros((n_filters, pixel_size, num_bins_in_chrom)),
+#    "norm":           np.zeros((n_filters, pixel_size, num_bins_in_chrom))
+#}
         all_maps= {pair:pair_maps[pair]["rotated_shapes"]/pair_maps[pair]["norm"] for pair in pair_maps.keys()}
         return all_maps
     
@@ -391,7 +424,7 @@ class PairOfDatasets(SiameseHiCDataset):
         all_maps_grouped, rep_pairs, cond_pairs = {}, 0, 0
         for pairs in all_maps.keys():
             if np.all(np.isnan(all_maps[pairs])): continue
-            if maps_metadata[pairs[0]]==maps_metadata[pairs[1]]:
+            if maps_metadata[pairs[0]]==maps_metadata[pairs[1]]: # pairs is actually self.labels for each feature map, which has pairwise information about each unique combo, like (1,3), which is mapped to the metadata, which classifies the numbers 1 and 3 into whether they are class 0/1 (control vs treatment)
                 rep_pairs +=1
                 if "replicate" in all_maps_grouped: all_maps_grouped["replicate"]+= all_maps[pairs]
                 else: all_maps_grouped["replicate"] = all_maps[pairs]
