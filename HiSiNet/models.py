@@ -68,12 +68,15 @@ class SLeNet(SiameseNet):
             nn.Linear(120, 83),
             nn.GELU(),
         )
+
+        #self.norm = nn.LayerNorm(83)
         self.distance = nn.CosineSimilarity()
 
     def forward_one(self, x):
         x = self.features(x)
         x = x.view(x.size(0), -1)
         x = self.linear(x)
+        #x = self.norm(x)
         return x
 
 class SAlexNet(SiameseNet):

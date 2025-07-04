@@ -368,8 +368,8 @@ class PairOfDatasets(SiameseHiCDataset):
     
                 # compute feature difference
                 if ci != cj:
-                    # control − KO
-                    if ci == 1 and cj == 0:
+                    # KO - Control
+                    if ci == 1 and cj == 0: # 1 is KO, 0 is Control
                         diff = self.model.features(img_i.unsqueeze(0)) - self.model.features(img_j.unsqueeze(0)) # Creates 16 channel 224 x 224 differential feature map
                     else:
                         diff = self.model.features(img_j.unsqueeze(0)) - self.model.features(img_i.unsqueeze(0))
