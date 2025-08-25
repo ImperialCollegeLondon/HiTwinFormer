@@ -2,6 +2,7 @@ import torch.nn as nn
 import torch
 import torch.nn.functional as F
 import numpy as np
+from torchvision.models import maxvit_t, resnet50
 
 #learn f(x) such that x is the wt and f(x) is the CTCFKO - then i have to clean and label in a different way.
 #or x is the CTCFKO and f(x) is the DKO
@@ -21,31 +22,47 @@ class SiameseNet(nn.Module):
         self.triplet = triplet
         self.supcon = supcon
         if mask:
-            mask = np.tril(np.ones(image_size), k=-3)+np.triu(np.ones(image_size), k=3)
-            self.mask = nn.Parameter(torch.tensor(np.array(mask), dtype=torch.int32), requires_grad = False)
+            mask = np.tril(np.ones(image_size), k=-3) + np.triu(np.ones(image_size), k=3)
+            self.mask = nn.Parameter(torch.tensor(mask, dtype=torch.int32), requires_grad=False)
+
     def mask_data(self, x):
-        if hasattr(self, "mask"): x=torch.mul(self.mask, x)
+        if hasattr(self, "mask"):
+            x = torch.mul(self.mask, x)
         return x
+
+    def normalize_data(self, x):
+        """Normalize batch of tensors (B,C,H,W) to [0, 1] by dividing by max."""
+        if torch.is_tensor(x):
+            max_vals = x.amax(dim=(1, 2, 3), keepdim=True)
+            return x / max_vals  # avoid division by zero
+        else:
+            raise TypeError("Input must be a PyTorch tensor")
+
     def forward_one(self, x):
         raise NotImplementedError
+
     def forward(self, x1, x2, x3=None):
-        if self.triplet: # for triplet loss
+        # Apply normalization if in eval/test mode
+
+        x1 = self.normalize_data(x1)
+        x2 = self.normalize_data(x2)
+        if x3 is not None:
+            x3 = self.normalize_data(x3)
+
+        if self.triplet:  # for triplet loss
             x1, x2, x3 = self.mask_data(x1), self.mask_data(x2), self.mask_data(x3)
-            out1 = self.forward_one(x1)
-            out2 = self.forward_one(x2)
-            out3 = self.forward_one(x3)
-            return out1, out2, out3
+            return self.forward_one(x1), self.forward_one(x2), self.forward_one(x3)
         elif self.supcon:
             pass
-        else: # for regular contrastive loss
+        else:  # for regular contrastive loss
             x1, x2 = self.mask_data(x1), self.mask_data(x2)
-            out1 = self.forward_one(x1)
-            out2 = self.forward_one(x2)
-            return out1, out2
+            return self.forward_one(x1), self.forward_one(x2)
 
 class SLeNet(SiameseNet):
     def __init__(self, *args, mask=False, image_size=224, triplet=False, supcon=False):
         super().__init__(mask=mask, image_size=image_size, triplet=triplet, supcon=supcon)
+
+        # same feature extractor
         self.features = nn.Sequential(
             nn.Conv2d(1,6,5,1),
             nn.MaxPool2d(2,2),
@@ -53,14 +70,95 @@ class SLeNet(SiameseNet):
             nn.MaxPool2d(2,2),
         )
 
-        # infer the “flattened” feature dim 
+        # infer flattened dim
         with torch.no_grad():
-            # create a dummy batch of size=1
             dummy = torch.zeros((1,)+(1,image_size,image_size))
             feat = self.features(dummy)
             feat_dim = int(feat.view(1, -1).size(1))
 
-        # now build a fully-specified linear head
+        # projection head
+        self.linear = nn.Sequential(
+            nn.Dropout(0.5),
+            nn.Linear(feat_dim, 120),
+            nn.GELU(),
+            nn.Linear(120, 83),
+            nn.GELU(),
+        )
+        
+    def forward_one(self, x):
+        x = self.features(x)
+        x = x.view(x.size(0), -1)
+        x = self.linear(x)
+
+        # only for SupCon / SINCERELoss and triplet
+        if self.supcon:
+            x = F.normalize(x, p=2, dim=1)
+
+        return x
+
+# For testing the original models
+
+class SiameseNet_ediem_test(nn.Module):
+    def __init__(self, mask=False, image_size=256, triplet=False, supcon=False):
+        super(SiameseNet_ediem_test, self).__init__()
+        self.triplet = triplet
+        self.supcon = supcon
+        if mask:
+            # shape: (1, H, W) to match checkpoint
+            mask_array = np.tril(np.ones(image_size), k=-3) + np.triu(np.ones(image_size), k=3)
+            mask_tensor = torch.tensor(mask_array, dtype=torch.int32).unsqueeze(0)  # add channel dim
+            self.mask = nn.Parameter(mask_tensor, requires_grad=False)
+
+    def mask_data(self, x):
+        if hasattr(self, "mask"):
+            x = torch.mul(self.mask, x)
+        return x
+
+    def normalize_data(self, x):
+        """Normalize batch of tensors (B,C,H,W) to [0, 1] by dividing by max."""
+        if torch.is_tensor(x):
+            max_vals = x.amax(dim=(1, 2, 3), keepdim=True)
+            return x / max_vals  # avoid division by zero
+        else:
+            raise TypeError("Input must be a PyTorch tensor")
+
+    def forward_one(self, x):
+        raise NotImplementedError
+
+    def forward(self, x1, x2, x3=None):
+        # Apply normalization if in eval/test mode
+
+        x1 = self.normalize_data(x1)
+        x2 = self.normalize_data(x2)
+        if x3 is not None:
+            x3 = self.normalize_data(x3)
+
+        if self.triplet:  # for triplet loss
+            x1, x2, x3 = self.mask_data(x1), self.mask_data(x2), self.mask_data(x3)
+            return self.forward_one(x1), self.forward_one(x2), self.forward_one(x3)
+        elif self.supcon:
+            pass
+        else:  # for regular contrastive loss
+            x1, x2 = self.mask_data(x1), self.mask_data(x2)
+            return self.forward_one(x1), self.forward_one(x2)
+
+
+class SLeNet_ediem_test(SiameseNet_ediem_test):
+    def __init__(self, *args, mask=False, image_size=224, triplet=False, supcon=False):
+        super().__init__(mask=mask, image_size=image_size, triplet=triplet, supcon=supcon)
+
+        self.features = nn.Sequential(
+            nn.Conv2d(1, 6, 5, 1),
+            nn.MaxPool2d(2, 2),
+            nn.Conv2d(6, 16, 5, 1),
+            nn.MaxPool2d(2, 2),
+        )
+
+        with torch.no_grad():
+            dummy = torch.zeros((1, 1, image_size, image_size))
+            feat = self.features(dummy)
+            feat_dim = int(feat.view(1, -1).size(1))
+
         self.linear = nn.Sequential(
             nn.Dropout(0.5),
             nn.Linear(feat_dim, 120),
@@ -69,51 +167,104 @@ class SLeNet(SiameseNet):
             nn.GELU(),
         )
 
-        #self.norm = nn.LayerNorm(83)
         self.distance = nn.CosineSimilarity()
 
     def forward_one(self, x):
         x = self.features(x)
         x = x.view(x.size(0), -1)
         x = self.linear(x)
-        #x = self.norm(x)
+        if self.supcon:
+            x = F.normalize(x, p=2, dim=1)
         return x
 
+# Didin't train well
 class SAlexNet(SiameseNet):
-    def __init__(self, *args, **kwargs):
-        super(SAlexNet, self).__init__(*args, **kwargs)
+    def __init__(self, *args, mask=False, image_size=224, triplet=False, supcon=False):
+        super().__init__(mask=mask, image_size=image_size, triplet=triplet, supcon=supcon)
+        
         self.features = nn.Sequential(
-            nn.Conv2d(1, 96, 11, 4),
+            nn.Conv2d(1, 96, kernel_size=11, stride=4),
             nn.GELU(),
             nn.LocalResponseNorm(size=5, alpha=0.0001, beta=0.75, k=2),
             nn.MaxPool2d(kernel_size=3, stride=2),
-            nn.Conv2d(96, 256, 5, padding=2),
+            nn.Conv2d(96, 256, kernel_size=5, padding=2),
             nn.GELU(),
             nn.LocalResponseNorm(size=5, alpha=0.0001, beta=0.75, k=2),
             nn.MaxPool2d(kernel_size=3, stride=2),
-            nn.Conv2d(256, 384, 3, padding=1),
+            nn.Conv2d(256, 384, kernel_size=3, padding=1),
             nn.GELU(),
-            nn.Conv2d(384, 384, 3, padding=1),
+            nn.Conv2d(384, 384, kernel_size=3, padding=1),
             nn.GELU(),
-            nn.Conv2d(384, 256, 3, padding=1),
+            nn.Conv2d(384, 256, kernel_size=3, padding=1),
             nn.GELU(),
             nn.MaxPool2d(kernel_size=3, stride=2),
         )
+
+        # Infer flattened feature dim using dummy input
+        with torch.no_grad():
+            dummy = torch.zeros((1, 1, image_size, image_size))
+            feat = self.features(dummy)
+            feat_dim = int(feat.view(1, -1).size(1))
+
         self.linear = nn.Sequential(
-            nn.Dropout(p=0.5, inplace=True),
-            nn.Linear(in_features=(256 * 6 * 6), out_features=4096),
+            nn.Dropout(0.5),
+            nn.Linear(feat_dim, 4096),
             nn.GELU(),
-            nn.Dropout(p=0.5, inplace=True),
-            nn.Linear(in_features=4096, out_features=4096),
+            nn.Dropout(0.5),
+            nn.Linear(4096, 4096),
             nn.GELU(),
-            nn.Linear(in_features=4096, out_features=83),
+            nn.Linear(4096, 512),
+            nn.GELU()
         )
+
+        self.norm = nn.LayerNorm(512)
         self.distance = nn.CosineSimilarity()
+
     def forward_one(self, x):
         x = self.features(x)
-        x = x.view(x.size()[0], -1)
+        x = x.view(x.size(0), -1)
         x = self.linear(x)
+        x = self.norm(x)
         return x
+
+# Didn't train well
+class SResNet50(SiameseNet):
+    def __init__(self, *args, mask=False, image_size=224, triplet=False, supcon=False):
+        super().__init__(mask=mask, image_size=image_size, triplet=triplet, supcon=supcon)
+        # load ResNet50 backbone without final FC
+        backbone = resnet50(pretrained=False)
+        # use all layers except the final fully-connected
+        self.features = nn.Sequential(*list(backbone.children())[:-1])  # includes avgpool
+
+        # infer flattened feature dim using dummy input
+        with torch.no_grad():
+            dummy = torch.zeros((1, 3, image_size, image_size))
+            feat = self.features(dummy)
+            feat_dim = int(feat.view(1, -1).size(1))
+
+        # build a flexible linear head
+        self.linear = nn.Sequential(
+            nn.Dropout(0.5),
+            nn.Linear(feat_dim, 4096),
+            nn.GELU(),
+            nn.Dropout(0.5),
+            nn.Linear(4096, 512),
+            nn.GELU()
+        )
+
+        self.norm = nn.LayerNorm(512)
+        self.distance = nn.CosineSimilarity()
+
+    def forward_one(self, x):
+        # if input is single-channel, expand to 3
+        if x.size(1) == 1:
+            x = x.repeat(1, 3, 1, 1)
+        x = self.features(x)
+        x = x.view(x.size(0), -1)
+        x = self.linear(x)
+        x = self.norm(x)
+        return x
+
 
 class SZFNet(SiameseNet):
     def __init__(self, *args, **kwargs):
@@ -188,12 +339,6 @@ class SZFNet(SiameseNet):
         y = self.fc_net(y)
         return y
 
-import torch
-import torch.nn as nn
-#from maxvit.maxvit_tiny import maxvit_t
-from torchvision.models import maxvit_t, MaxVit_T_Weights
-
-
 class MaxVitEmbedder(nn.Module):
     def __init__(self):
         super().__init__()
@@ -202,29 +347,14 @@ class MaxVitEmbedder(nn.Module):
         self.blocks = base.blocks
         self.pool = base.classifier[0]  # AdaptiveAvgPool2d
         self.flatten = base.classifier[1]  # Flatten
-        self.norm = base.classifier[2]  # LayerNorm
-        self.embedding_dim = self.norm.normalized_shape[0]
+        self.embedding_dim = base.classifier[2].normalized_shape[0]  # 512
 
     def forward(self, x):
-        # Print the shape of x at the start
-        #print("Shape of x at start:", x.shape)
-
         x = self.stem(x)
-        #print("Shape of x after stem:", x.shape)
-
-        for i, block in enumerate(self.blocks):
+        for block in self.blocks:
             x = block(x)
-            #print(f"Shape of x after block {i}:", x.shape)
-
         x = self.pool(x)
-        #print("Shape of x after pool:", x.shape)
-
         x = self.flatten(x)
-        #print("Shape of x after flatten:", x.shape)
-
-        x = self.norm(x)
-        #print("Shape of x after norm:", x.shape)
-
         return x  # (B, 512)
 
 
@@ -238,63 +368,65 @@ class SMaxVit(SiameseNet):
         # Repeat single-channel to 3 if needed (make into color essentially)
         if x.shape[1] == 1:
             x = x.repeat(1, 3, 1, 1)
-        return self.embedder(x)  # returns (B, 512)
+        x = self.embedder(x)  # (B, 512)
+
+        # Only L2-normalize for SupCon / SINCERELoss
+        if self.supcon:
+            x = F.normalize(x, p=2, dim=1)
+
+        return x
+
 
 class MaxViTMultiScaleEmbedder(nn.Module):
     """
-    A MaxViT‑Tiny backbone that returns a concatenated embedding
-    of pooled features from each of its 4 transformer blocks.
+    MaxViT-Tiny backbone that returns pooled multiscale features.
+    Pools from each of the 4 transformer blocks, concatenates, and
+    projects to 512 dimensions.
     """
-    def __init__(embed_dim: int | None = None):
+    def __init__(self, output_dim: int = 512):
         super().__init__()
-        # 1) Load base model
         base = maxvit_t(weights=None)
 
-        # 2) Reuse stem + blocks
-        self.stem   = base.stem            # initial conv layers
-        self.blocks = base.blocks          # ModuleList of 4 MaxVitBlock
+        # Stem + transformer blocks
+        self.stem   = base.stem
+        self.blocks = base.blocks
 
-        # 3) One pool & flatten per block
+        # Pooling
         self.pool = nn.AdaptiveAvgPool2d(1)
-        self.flatten = nn.Flatten(1)       # (B, C, 1, 1) → (B, C)
+        self.flatten = nn.Flatten(1)  # (B, C, 1, 1) → (B, C)
 
-        # 4) Explicit channel sizes for maxvit_t
-        #    These are the default `block_channels` = [64, 128, 256, 512]
+        # Channel sizes for maxvit_t
         channel_dims = [64, 128, 256, 512]
-        concat_dim = sum(channel_dims)
+        concat_dim = sum(channel_dims)  # 960 for tiny
 
-        # 5) Optional projection head
-        if embed_dim is not None:
-            self.projector = nn.Linear(concat_dim, embed_dim, bias=False)
-            self.output_dim = embed_dim
-        else:
-            self.projector = nn.Identity()
-            self.output_dim = concat_dim
+        # Projection to fixed dim (512 by default)
+        self.projector = nn.Linear(concat_dim, output_dim, bias=False)
+        self.output_dim = output_dim
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # 1) initial stem
         x = self.stem(x)
 
-        # 2) iterate over blocks, pool each output
         feats = []
         for block in self.blocks:
-            x = block(x)           # apply this transformer block
-            f = self.pool(x)            # → (B, C_i, 1, 1)
-            f = self.flatten(f)    # → (B, C_i)
+            x = block(x)
+            f = self.pool(x)
+            f = self.flatten(f)
             feats.append(f)
 
-        # 3) concatenate all pooled features
-        multiscale = torch.cat(feats, dim=1)  # (B, 960) for tiny
-
-        # 4) optional projection
-        emb = self.projector(multiscale)      # (B, output_dim)
+        multiscale = torch.cat(feats, dim=1)      # (B, 960)
+        emb = self.projector(multiscale)          # (B, 512)
         return emb
 
-#model = MaxViTMultiScaleEmbedder(pretrained=True, embed_dim=256).cuda().eval()
-#print("Output dim:", model.output_dim)   # 256
+class SMaxViTMulti(SiameseNet):
+    """Siamese wrapper for the 512-dim MaxViT multiscale embedder."""
+    def __init__(self, mask=False, image_size=224, triplet=False, supcon=False):
+        super().__init__(mask=mask, image_size=image_size, triplet=triplet, supcon=supcon)
+        self.embedder = MaxViTMultiScaleEmbedder(output_dim=512)
 
-#x = torch.randn(8, 3, 224, 224, device='cuda')
-#with torch.no_grad():
-   # out = model(x)
-#print("Multiscale embedding shape:", out.shape)  # torch.Size([8, 256])
-
+    def forward_one(self, x):
+        if x.shape[1] == 1:
+            x = x.repeat(1, 3, 1, 1)
+        x = self.embedder(x)  # (B, 512)
+        if self.supcon:
+            x = F.normalize(x, p=2, dim=1)
+        return x

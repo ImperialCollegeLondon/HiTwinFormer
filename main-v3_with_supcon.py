@@ -37,17 +37,20 @@ parser.add_argument('--loss', type=str, default="contrastive", choices=['contras
 parser.add_argument('--n_aug', type=int, default=0, help='Number of times you want to augment data with poisson/dropout')
 parser.add_argument('--experiment_name', default="", type=str, help='name for wandb project')
 parser.add_argument('--test_version', default="", type=str, help='for rerunning same run')
+parser.add_argument('--mixed_precision', type=bool, default=True, help='Enable mixed precision training')
+parser.add_argument('--optimiser', type=str, default="Adam", choices=['Adam','Adagrad'], help="optimiser")
 
 args = parser.parse_args()
 
 loss_function = args.loss
 loss_function = loss_function.lower()
-
+use_amp = args.mixed_precision
+optimiser_name = args.optimiser
 
 # Initialize wandb
 wandb.init(
     project=f"HiSiNet_{args.experiment_name}",
-    name=f"{args.model_name}_lr{args.learning_rate}_bs{args.batch_size}_seed{args.seed}_lf{args.loss}_num_aug{args.n_aug}_{args.experiment_name}_{args.test_version}",
+    name=f"{args.model_name}_lr{args.learning_rate}_bs{args.batch_size}_seed{args.seed}_lf{args.loss}_num_aug{args.n_aug}_{args.experiment_name}_{args.test_version}_{optimiser_name}",
     config=vars(args)
 )
 
@@ -79,28 +82,41 @@ model = eval("models." + args.model_name)(mask=args.mask, image_size=args.image_
 if loss_function=="contrastive":
     nn_model = models.LastLayerNN().to(cuda)
 
-model_path = f"{args.outpath}{args.model_name}_{args.experiment_name}_{args.learning_rate}_{args.batch_size}_{loss_function}_{args.seed}_{args.n_aug}_aug_{args.test_version}"
-torch.save(model.state_dict(), model_path + ".ckpt")
-if loss_function=="contrastive":
-    torch.save(nn_model.state_dict(), model_path + "_nn.ckpt")
+model_path = f"{args.outpath}{args.model_name}_{args.experiment_name}_{args.learning_rate}_{args.batch_size}_{loss_function}_{args.seed}_{optimiser_name}_{args.n_aug}_aug_{args.test_version}"
+#torch.save(model.state_dict(), model_path + ".ckpt")
+#if loss_function=="contrastive":
+#    torch.save(nn_model.state_dict(), model_path + "_nn.ckpt")
 
 # Loss, optimizer, AMP, augmentor
 contrastive_loss_fn = ContrastiveLoss()
 supcon_loss_fn = MultiviewSINCERELoss()
 classification_loss_fn = nn.CrossEntropyLoss()
 triplet_loss_fn= nn.TripletMarginLoss(margin=1.0, p=2, eps=1e-7)
-if loss_function == "contrastive":
-    # Dummy input to initialize nn_model (LastLayerNN)
-    with torch.no_grad():
-        dummy_feat = torch.randn(1, model.linear[-2].out_features).to(cuda)
-        _ = nn_model(dummy_feat, dummy_feat)
 
-    optimizer = optim.Adagrad(
+optimizer_class = getattr(optim, optimiser_name)  # dynamically get the optimizer
+if loss_function == "contrastive":
+    # Infer embedding dimension based on model type
+    if hasattr(model, 'linear'):
+        feat_dim = model.linear[-2].out_features
+    elif hasattr(model, 'embedder') and hasattr(model.embedder, 'embedding_dim'): # for maxvit model backbone which doesn't have linear layer
+        feat_dim = model.embedder.embedding_dim
+    else:
+        # Fallback: use dummy forward pass to infer shape
+        with torch.no_grad():
+            dummy_input = torch.randn(1, 1, args.image_size, args.image_size).to(cuda)
+            feat_dim = model.forward_one(dummy_input).shape[1]
+
+    # Create dummy feature for initializing nn_model
+    dummy_feat = torch.randn(1, feat_dim).to(cuda)
+    _ = nn_model(dummy_feat, dummy_feat)
+
+    # Optimizer includes both model and nn_model parameters
+    optimizer = optimizer_class(
         list(model.parameters()) + list(nn_model.parameters()),
         lr=args.learning_rate
     )
 else:
-    optimizer = optim.Adagrad(model.parameters(), lr=args.learning_rate)
+    optimizer = optimizer_class(model.parameters(), lr=args.learning_rate)
     
 scaler = torch.GradScaler("cuda" ,enabled=True)
 augmentor = Augmentations()
@@ -142,7 +158,7 @@ for epoch in range(1, args.epoch_training + 1):
             x2 = augmentor.normalize(x2).to(cuda)    
             labels = labels.to(cuda)
 
-            with torch.autocast(device_type='cuda'):
+            with torch.autocast(device_type='cuda', enabled= use_amp):
                 feat1, feat2 = model(x1, x2)
                 logits = nn_model(feat1, feat2)
     
@@ -157,8 +173,7 @@ for epoch in range(1, args.epoch_training + 1):
     
             train_contrastive_loss += contrastive_loss.item()
             train_classification_loss += class_loss.item()
-            torch.cuda.empty_cache()
-            
+        avg_train_cont = train_contrastive_loss / total_train_batches
    
     
     elif loss_function == "triplet":
@@ -182,65 +197,68 @@ for epoch in range(1, args.epoch_training + 1):
             x2 = augmentor.normalize(x2).to(cuda)
             x3 = augmentor.normalize(x3).to(cuda)
 
-            with torch.autocast(device_type='cuda'):
+            with torch.autocast(device_type='cuda', enabled= use_amp):
                 feat1, feat2, feat3 = model(x1, x2, x3)
                 contrastive_loss = triplet_loss_fn(feat1, feat2, feat3)
-                total_loss = contrastive_loss # args.bias * contrastive_loss + class_loss
     
-            scaler.scale(total_loss).backward()
+            scaler.scale(contrastive_loss).backward()
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad()
     
             train_contrastive_loss += contrastive_loss.item()
-            #train_classification_loss += class_loss.item()
-            torch.cuda.empty_cache()
+        avg_train_cont = train_contrastive_loss / total_train_batches
 
     elif loss_function == "supcon":
+        total_tiles = 0
+        total_loss = 0.0
+
         for tile_list, label_list in train_loader:
-            batch_loss = 0.0
-    
+            batch_loss = torch.tensor(0.0, device=cuda)
+
             for views, labels in zip(tile_list, label_list):
                 labels = labels.tolist()
                 control_views, treatment_views = [], []
-    
+
                 for view, label in zip(views, labels):
                     if label == 0:
                         control_views.append(view)
                     elif label == 1:
                         treatment_views.append(view)
-    
+
                 control_aug = [view for v in control_views for view in [v] + [augmentor(v, force_augmentation=True) for _ in range(args.n_aug)]]
                 treatment_aug = [view for v in treatment_views for view in [v] + [augmentor(v, force_augmentation=True) for _ in range(args.n_aug)]]
-    
+
                 control_tensor = torch.stack(control_aug)
                 treatment_tensor = torch.stack(treatment_aug)
                 all_views = torch.cat([control_tensor, treatment_tensor], dim=0)
                 all_views = augmentor.normalize(all_views).to(cuda)
-    
-                with torch.autocast(device_type='cuda'):
+
+                with torch.autocast(device_type='cuda', enabled= use_amp):
                     features = model.forward_one(all_views)
                     features = F.normalize(features, dim=1)
-    
+
                     n_control = control_tensor.shape[0]
-                    
+
                     tile_loss_info = torch.stack([
                         features[:n_control],
                         features[n_control:]
                     ], dim=0)
-    
+
                     condition_labels = torch.tensor([0, 1], dtype=torch.long).to(cuda)
                     tile_loss = supcon_loss_fn(tile_loss_info, condition_labels)
                     batch_loss += tile_loss
-            average_batch_loss = batch_loss/len(tile_list)
-            scaler.scale(average_batch_loss).backward()
+                    total_loss += tile_loss.item()
+                    total_tiles += 1
+
+            # Backprop once per batch
+            scaler.scale(batch_loss / len(tile_list)).backward()
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad()
-            train_contrastive_loss += average_batch_loss.item()
-            torch.cuda.empty_cache()
-            
-    avg_train_cont = train_contrastive_loss / total_train_batches
+
+        avg_train_cont = total_loss / total_tiles
+        
     if loss_function=="contrastive":
         avg_train_class = train_classification_loss / total_train_batches
 
@@ -257,25 +275,24 @@ for epoch in range(1, args.epoch_training + 1):
                 x1 = augmentor.normalize(x1).to(cuda)
                 x2 = augmentor.normalize(x2).to(cuda)
                 labels = labels.to(cuda).float()
-                with torch.autocast(device_type="cuda"):
+                with torch.autocast(device_type="cuda", enabled= use_amp):
                     feat1, feat2 = model(x1, x2)
                     val_contrastive_loss += contrastive_loss_fn(feat1, feat2, labels).item()
-                torch.cuda.empty_cache()
-
+            avg_val_cont = val_contrastive_loss / total_val_batches
         elif loss_function == "triplet":
             for x1, x2, x3 in val_loader:
                 x1 = augmentor.normalize(x1).to(cuda)
                 x2 = augmentor.normalize(x2).to(cuda)
                 x3 = augmentor.normalize(x3).to(cuda)
-                with torch.autocast(device_type="cuda"):
+                with torch.autocast(device_type="cuda", enabled= use_amp):
                     feat1, feat2, feat3 = model(x1, x2, x3)
                     val_contrastive_loss += triplet_loss_fn(feat1, feat2, feat3).item()
-                torch.cuda.empty_cache()
-
+            avg_val_cont = val_contrastive_loss / total_val_batches
         elif loss_function == "supcon":
             # No augmentations in validation
+            total_tiles = 0
+            total_loss  = 0.0
             for tile_list, label_list in val_loader:
-                batch_loss = 0.0
 
                 for views, labels in zip(tile_list, label_list):
                     labels = labels.tolist()
@@ -292,7 +309,7 @@ for epoch in range(1, args.epoch_training + 1):
                     all_views        = torch.cat([control_tensor, treatment_tensor], dim=0)
                     all_views        = augmentor.normalize(all_views).to(cuda)
 
-                    with torch.autocast(device_type='cuda'):
+                    with torch.autocast(device_type='cuda', enabled= use_amp):
                         features = model.forward_one(all_views)
                         features = F.normalize(features, dim=1)
         
@@ -305,13 +322,9 @@ for epoch in range(1, args.epoch_training + 1):
         
                         condition_labels = torch.tensor([0, 1], dtype=torch.long).to(cuda)
                         tile_loss = supcon_loss_fn(tile_loss_info.float(), condition_labels)
-                        batch_loss += tile_loss
-                average_batch_loss = batch_loss/len(tile_list)
-            val_contrastive_loss += average_batch_loss.item()
-
-            torch.cuda.empty_cache()
-
-    avg_val_cont = val_contrastive_loss / total_val_batches
+                        total_loss += tile_loss.item()
+                        total_tiles  += 1
+            avg_val_cont = total_loss / total_tiles
 
     # Logging
     

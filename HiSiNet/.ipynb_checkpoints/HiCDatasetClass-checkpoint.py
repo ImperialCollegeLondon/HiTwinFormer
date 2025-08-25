@@ -17,7 +17,7 @@ from itertools import combinations
 import random
 
 class HiCDataset(Dataset):
-    """Hi-C dataset."""
+    """Hi-C dataset base class"""
     def __init__(self, metadata, data_res, resolution, stride=8, exclude_chroms=['chrY','chrX', 'Y', 'X', 'chrM', 'M'], reference = 'mm9', normalise = False):
         """
         Args:
@@ -69,7 +69,7 @@ class HiCDataset(Dataset):
 
 
 class HiCDatasetDec(HiCDataset):
-    """Hi-C dataset loader using hicstraw.HiCFile interface. Creates image tiles for each chromosomes"""
+    """Hi-C dataset loader using hicstraw.HiCFile interface. Creates image tiles for each chromosome. loop through stride length and then extract tiles and quality control"""
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # open .hic file
@@ -141,9 +141,6 @@ class HiCDatasetDec(HiCDataset):
 
         # if we want to augment the data we don't want to normalise (make between 0-1) it yet
         mat = np.nan_to_num(matrix)
-        if self.normalise:
-            norm = mat.max() if mat.max() > 0 else 1
-            mat = mat / norm
 
         # to tensor shape [1,C,H,W]
         tensor = torch.tensor(mat, dtype=torch.float32).unsqueeze(0)
@@ -168,7 +165,7 @@ class GroupedHiCDataset(HiCDataset):
         self.starts.append(len(self.data)) # Add start index
 
 class SiameseHiCDataset(HiCDataset):
-    """Paired Hi-C datasets by genomic location."""
+    """Dataset creation class to make either pairs, triplets, or all tile locations for one location for SupCon"""
     def __init__(self, list_of_HiCDatasets, triplet=False, supcon=False, sims=(0,1), reference = reference_genomes["mm9"]):
         self.triplet = triplet #if using triplet loss data should be created differently
         self.supcon = supcon
@@ -340,117 +337,261 @@ class HiCDatasetCool(HiCDataset):
         image_scp = as_torch_tensor(image_scp, dtype=torch_float)
         self.data.append((image_scp, self.metadata['class_id']))
         self.positions.append( int(self.data_res*(start_pos-first)))
-        
+
 class PairOfDatasets(SiameseHiCDataset):
-    """Paired Hi-C datasets by genomic location to create feature map."""
-    def __init__(self, list_of_HiCDatasets, model, **kwargs):
-        reference = kwargs.pop("reference", reference_genomes["mm9"]) # make mm9 default reference
-        # 2) Store your model
-        self.model = model
-        # 3) Call SiameseHiCDataset.__init__:
-        super(PairOfDatasets, self).__init__(
-            list_of_HiCDatasets,
-            reference=reference
-        )
-        self.pixel_size = int(self.resolution/self.data_res)
+    def __init__(
+        self,
+        list_of_HiCDatasets,
+        model,
+        diagonal_off=3,
+        compute_saliency=False,
+        **kwargs
+    ):
+        """
+        Feature and saliency map creation
+        Args:
+            list_of_HiCDatasets: list of HiCDataset instances
+            model: trained Siamese model
+            diagonal_off: int, diagonal mask offset
+            compute_saliency: bool, if False skips IG computations
+        """
+        import sys
+        print("[PairOfDatasets] 1: entering __init__", flush=True)
+        self.model = model.eval()
+        self._diag_off   = diagonal_off
+        self.compute_sal = compute_saliency
+        self.saliency    = []  # filled in append_d
+        print("[PairOfDatasets] 2: model set", flush=True)
+        
+        reference = kwargs.pop("reference", reference_genomes["mm9"])
+        print("[PairOfDatasets] 3: about to call super().__init__", flush=True)
+        super().__init__(list_of_HiCDatasets, reference=reference)
+        print("[PairOfDatasets] 4: returned from super().__init__", flush=True)
+        
+        print("[PairOfDatasets] 5: computing pixel_size", flush=True)
+        self.pixel_size = int(self.resolution / self.data_res)
+        
+        print("[PairOfDatasets] 6: about to build paired_maps dict comprehension", flush=True)
         self.paired_maps = {
             chrom: self.make_maps(chrom)
-            for chrom in self.chromosomes.keys()
+            for chrom in self.chromosomes
         }
-        
-    def append_data(self, curr_data, pos, chrom): # Replaces old append_data in siamese class
-        data_list = []
-# curr_data is a list of (img_tensor, class_id)
-        for i in range(len(curr_data)):
-            img_i, ci = curr_data[i]
-            for j in range(i+1, len(curr_data)):
-                img_j, cj = curr_data[j]
+        print("[PairOfDatasets] 7: finished building paired_maps", flush=True)
+
     
-                # compute feature difference
+    def make_maps(self, chromosome):
+        print(f"started map making for {chromosome}", flush=True)
+        base = self.make_maps_base(chromosome)
+        return self.make_maps_grouped(base)
+
+    def integrated_gradients(self, x1, x2, n_steps=50):
+        """Compute 2D IG saliency for embedding‐distance between x1,x2."""
+        device = x1.device
+        tg1 = torch.zeros_like(x1, device=device)
+        tg2 = torch.zeros_like(x2, device=device)
+
+        for alpha in np.linspace(0, 1, n_steps):
+            xi1 = (x2 + alpha*(x1 - x2)).detach().requires_grad_(True)
+            xi2 = (x1 + alpha*(x2 - x1)).detach().requires_grad_(True)
+
+            d1 = torch.norm(self.model.forward_one(xi1) - self.model.forward_one(x2), 2) # Euclidian distance calculation
+            d2 = torch.norm(self.model.forward_one(x1)  - self.model.forward_one(xi2), 2)
+
+            self.model.zero_grad(); d1.backward()
+            tg1 += xi1.grad; xi1.grad.zero_()
+            self.model.zero_grad(); d2.backward()
+            tg2 += xi2.grad; xi2.grad.zero_()
+
+        ag1 = tg1 / n_steps
+        ag2 = tg2 / n_steps
+        ig1 = (x1 - x2) * ag1
+        ig2 = (x2 - x1) * ag2
+        comb = 0.5 * (ig1 + ig2)
+        heatmap = comb.mean(dim=1).squeeze().cpu().numpy()  # (H,W)
+        return heatmap
+
+    def append_data(self, curr_data, pos, chrom): # Class replaces old append_data from Siamese dataset creation call during init. 
+        data_list, sal_list = [], []
+
+        if len(curr_data) < 2:
+            return
+        H = curr_data[0][0].shape[-1]
+        band = (
+            np.tril(np.ones((H,H)),  k=-self._diag_off)
+          + np.triu(np.ones((H,H)),  k= self._diag_off)
+        ).astype(float)
+        diag_mask = torch.from_numpy(band).float().to(curr_data[0][0].device)
+
+        for i, (img_i, ci) in enumerate(curr_data):
+            for j, (img_j, cj) in enumerate(curr_data[i+1:], start=i+1):
+                mi = img_i * diag_mask
+                mj = img_j * diag_mask
+
+                fi = self.model.features(mi.unsqueeze(0)).abs()
+                fj = self.model.features(mj.unsqueeze(0)).abs()
                 if ci != cj:
-                    # KO - Control
-                    if ci == 1 and cj == 0: # 1 is KO, 0 is Control
-                        diff = self.model.features(img_i.unsqueeze(0)) - self.model.features(img_j.unsqueeze(0)) # Creates 16 channel 224 x 224 differential feature map
-                    else:
-                        diff = self.model.features(img_j.unsqueeze(0)) - self.model.features(img_i.unsqueeze(0))
+                    diff = fi - fj if (ci==1 and cj==0) else fj - fi # Calculate difference between treatment and control class tiles 
                 else:
-                    # same class
-                    diff = self.model.features(img_i.unsqueeze(0)) - self.model.features(img_j.unsqueeze(0))
-    
+                    diff = fi - fj
+
                 data_list.append(diff.detach().cpu().numpy()[0])
 
-        self.data.extend(data_list)
-        self.positions.extend( [pos for k in range(0,len(curr_data)) for j in range(k+1,len(curr_data))])
-        self.labels.extend( [( k, j) for k in range(0,len(curr_data)) for j in range(k+1,len(curr_data))])
-        self.pos.extend([(pos, chrom) for k in range(0,len(curr_data)) for j in range(k+1,len(curr_data))])
-        
-    def make_maps_base(self, chromosome, diagonal_off=4):
-        nfilter = self.model.features[-2].out_channels
-        chrom_index1, chrom_index2 = self.chromosomes[chromosome]
-        if (chrom_index2==chrom_index1): return None
-        dims = (nfilter, self.pixel_size , int((self.positions[chrom_index1])/self.data_res) + self.pixel_size)
-        pair_maps = {}
-        dataset_dims=(self.pixel_size, self.pixel_size)
+                # Only compute saliency for between-class comparisons
+                if self.compute_sal:
+                    s_map = self.integrated_gradients(
+                        mi.unsqueeze(0), mj.unsqueeze(0), n_steps=50
+                    )
+                else:
+                    s_map = np.zeros((H, H), dtype=float)
+                sal_list.append(s_map)
 
-        for (map1,map2) in [(j,i) for j in range(0,len(self.metadata)) for i in range(j+1,len(self.metadata))]:
-            pair_maps[(map1,map2)] = {}
-            pair_maps[(map1,map2)]["rotated_shapes"] = np.zeros(dims)
-            pair_maps[(map1,map2)]["norm"] = np.zeros(dims) 
+        L = len(data_list)
+        self.data     .extend(data_list)
+        self.saliency .extend(sal_list)
+        self.positions.extend([pos]*L)
+        self.labels   .extend([
+            (a,b) for a in range(len(curr_data)) for b in range(a+1, len(curr_data))
+        ])
+        self.pos      .extend([(pos,chrom)]*L)
 
-        for ind in range(chrom_index2, chrom_index1, -1):
-            true_ind=ind-1
-            for curr_filt in range(0, nfilter):
-                x = self.data[true_ind][curr_filt]
-                x = (x+np.transpose(x))/2 # Not sure if needed...
-                x = np.multiply(x,(np.tril(np.ones(x.shape[0]), -diagonal_off)+np.triu(np.ones(x.shape[1]), k=diagonal_off)))
-                rotated = ndimage.rotate(x, angle=45, reshape=True)
-                #if np.all(np.isnan(rotated )): return None 
-                rotated = resize(rotated, dataset_dims)
-                pair_maps[self.labels[true_ind]]["rotated_shapes"][curr_filt, :, int(self.positions[true_ind]/self.data_res):int((self.positions[true_ind]+self.resolution)/self.data_res)]+=rotated 
-                pair_maps[self.labels[true_ind]]["norm"][curr_filt, :,int(self.positions[true_ind]/self.data_res):int((self.positions[true_ind]+self.resolution)/self.data_res)]+=1
+    def make_maps_base(self, chromosome):
+        nfilter = self.model.features[-2].out_channels # 16 channels in LeNet
+        chrom_i, chrom_j = self.chromosomes[chromosome] # chrom_i is index of data at max position and chrom_j at min position
+        if chrom_i == chrom_j:
+            return None
 
-        # places rotated extracted feature tile on a canvas for each chromosome. For each pair_maps, get a nested dictionary for each unique tile pairing that contains this info: {
-#    "rotated_shapes": np.zeros((n_filters, pixel_size, num_bins_in_chrom)),
-#    "norm":           np.zeros((n_filters, pixel_size, num_bins_in_chrom))
-#}
-        all_maps= {pair:pair_maps[pair]["rotated_shapes"]/pair_maps[pair]["norm"] for pair in pair_maps.keys()}
-        return all_maps
-    
-    def make_maps_grouped(self,all_maps):
-        if all_maps is None: return None
-        all_maps_grouped = {}
-        maps_metadata = {}
-        maps_metadata = { i:metadata["class_id"]  for i, metadata in enumerate(self.metadata)}
-        all_maps_grouped, rep_pairs, cond_pairs = {}, 0, 0
-        for pairs in all_maps.keys():
-            if np.all(np.isnan(all_maps[pairs])): continue
-            if maps_metadata[pairs[0]]==maps_metadata[pairs[1]]: # pairs is actually self.labels for each feature map, which has pairwise information about each unique combo, like (1,3), which is mapped to the metadata, which classifies the numbers 1 and 3 into whether they are class 0/1 (control vs treatment)
-                rep_pairs +=1
-                if "replicate" in all_maps_grouped: all_maps_grouped["replicate"]+= all_maps[pairs]
-                else: all_maps_grouped["replicate"] = all_maps[pairs]
+        length    = int((self.positions[chrom_i] + self.resolution) / self.data_res)
+        dims_feat = (nfilter, self.pixel_size, length)
+        dims_sal  = (self.pixel_size, length)
+
+        pair_maps = {
+            pair: {
+                "rotated_shapes": np.zeros(dims_feat),
+                "norm"          : np.zeros(dims_feat),
+                "saliency"      : np.zeros(dims_sal),
+                "sal_norm"      : np.zeros(dims_sal),
+            }
+            for pair in self.labels
+        }
+
+        for idx in range(chrom_j, chrom_i, -1):
+            true    = idx - 1
+            pair    = self.labels[true]
+            pos_bin = int(self.positions[true] / self.data_res)
+
+            # 1) rotate and tile feature‐maps
+            for f in range(nfilter):
+                x = self.data[true][f]
+                x = (x + x.T) / 2
+                rot_feat = ndimage.rotate(x, 45, reshape=True)
+                small_f  = resize(rot_feat,
+                                  (self.pixel_size, self.pixel_size),
+                                  preserve_range=True,
+                                  anti_aliasing=False)
+                pair_maps[pair]["rotated_shapes"][f,
+                                                   :,
+                                                   pos_bin:pos_bin+self.pixel_size] += small_f # place symmetrised and rotated featured difference tile on map
+                pair_maps[pair]["norm"         ][f,
+                                                   :,
+                                                   pos_bin:pos_bin+self.pixel_size] += 1
+
+            # 2) rotate and tile saliency map (for all comparisons)
+            if self.compute_sal:
+                s = self.saliency[true]        # (H, W)
+                H, W = s.shape
+                # Create the diagonal mask
+                band = (
+                    np.tril(np.ones((H, W)), k=-self._diag_off)
+                    + np.triu(np.ones((H, W)), k=self._diag_off)
+                )
+                mask2d = band.astype(bool)
+                s0 = np.where(mask2d, s, 0.0)
+                rot_s = ndimage.rotate(s0, 45, reshape=True)
+                small_s = resize(rot_s,
+                                 (self.pixel_size, self.pixel_size),
+                                 preserve_range=True,
+                                 anti_aliasing=False)
+                pair_maps[pair]["saliency"][:, pos_bin:pos_bin+self.pixel_size] += small_s # Same as above but for saliency
+                pair_maps[pair]["sal_norm"][:, pos_bin:pos_bin+self.pixel_size] += 1
+                
+        print(f"created {chromosome} map", flush=True)
+        # finalize averages
+        all_maps = {}
+        for pair, vals in pair_maps.items():
+            feat = vals["rotated_shapes"] / vals["norm"] # calculate average map
+            if self.compute_sal:
+                sal = vals["saliency"] / vals["sal_norm"]
             else:
-                cond_pairs +=1
-                if "conditions" in all_maps_grouped: all_maps_grouped["conditions"]+= all_maps[pairs]
-                else: all_maps_grouped["conditions"] = all_maps[pairs]
-                    
-        all_maps_grouped["replicate"]=all_maps_grouped["replicate"]/rep_pairs
-        all_maps_grouped["conditions"]=all_maps_grouped["conditions"]/cond_pairs
-        return all_maps_grouped
-    
-    def extract_features(self, chromosome, nfilter, pair, qthresh=0.999, min_length=10, max_length=256, min_width=10,max_width=256, pad_extra=3, im_size=20):
-        if nfilter=="all": curr_map = np.concatenate([np.sum(value["replicate"][:,:int(self.pixel_size/2),:],axis=0) for chrom, value in self.paired_maps.items() 
-                            if value is not None ], axis=1)
-        else: curr_map = np.concatenate([value["replicate"][nfilter,:int(self.pixel_size/2),:] for chrom, value in self.paired_maps.items() 
-                            if value is not None ], axis=1)
+                sal = vals["saliency"]  # Will be zeros when saliency is disabled
+            all_maps[pair] = {"replicate": feat,
+                              "saliency" : sal}
+        print(f"normalised {chromosome} map", flush=True)
+        return all_maps
 
+    def make_maps_grouped(self, all_maps):
+        """ Groups paired maps by condition (replicate or condition) """
+        if all_maps is None:
+            return None
+        print(f"started grouping maps", flush=True)
+        grouped = {"replicate": None, "conditions": None, "saliency_replicate": None, "saliency_conditions": None}
+        counts  = {"replicate": 0, "conditions": 0, "sal_replicate": 0, "sal_conditions": 0}
+        
+        for pair, mp in all_maps.items():
+            typ = ("replicate"
+                   if self.metadata[pair[0]]["class_id"]
+                      == self.metadata[pair[1]]["class_id"]
+                   else "conditions")
+            
+            # accumulate feature maps
+            arr = mp["replicate"]
+            if grouped[typ] is None:
+                grouped[typ] = arr.copy()
+            else:
+                grouped[typ] += arr
+            counts[typ] += 1
+
+            # accumulate saliency maps separately for replicate and conditions
+            sal = mp["saliency"]
+            sal_key = f"saliency_{typ}"
+            count_key = f"sal_{typ}"
+            
+            if grouped[sal_key] is None:
+                grouped[sal_key] = sal.copy()
+            else:
+                grouped[sal_key] += sal
+            counts[count_key] += 1
+
+        # divide by counts
+        for k in ("replicate", "conditions"):
+            if grouped[k] is not None and counts[k] > 0:
+                grouped[k] /= counts[k]
+                
+        for k in ("saliency_replicate", "saliency_conditions"):
+            count_key = k.replace("saliency_", "sal_")
+            if grouped[k] is not None and counts[count_key] > 0:
+                grouped[k] /= counts[count_key]
+                
+        print(f"finished grouping maps", flush=True)
+        return grouped
+
+    def extract_features(self, chromosome, nfilter, pair, qthresh=0.999, min_length=10, max_length=256, min_width=10,max_width=256, pad_extra=3, im_size=20):
+        if nfilter=="all": curr_map = np.concatenate([np.sum(value[pair][:,:int(self.pixel_size/2),:],axis=0) for chrom, value in self.paired_maps.items() 
+                            if value is not None ], axis=1) # create a global paired map for thresholding
+        else: curr_map = np.concatenate([value[pair][nfilter,:int(self.pixel_size/2),:] for chrom, value in self.paired_maps.items() 
+                            if value is not None ], axis=1)
+        band = np.ones_like(curr_map, dtype=bool)
+        band[-pad_extra:, :] = False  # Mask out the bottom 3 rows
+        curr_map = np.where(band, curr_map, np.nan)
         pos_thresh = np.max([np.nanquantile(curr_map, qthresh),-np.nanquantile(curr_map, 1-qthresh)])
-        neg_thresh = np.min([-np.nanquantile(curr_map, qthresh),np.nanquantile(curr_map, 1-qthresh)])
+        neg_thresh = np.min([-np.nanquantile(curr_map, qthresh),np.nanquantile(curr_map, 1-qthresh)]) # calculate global intensity threshold
 
         if nfilter=="all": curr_map=np.sum(self.paired_maps[chromosome][pair][:,int(self.pixel_size/2):,:],axis=0)
         else: curr_map=self.paired_maps[chromosome][pair][nfilter,int(self.pixel_size/2):,:]
-
-        arr_pos, arr_neg =  (curr_map>pos_thresh), (curr_map<neg_thresh)
-        arr_pos, arr_neg =  ndimage.label(arr_pos), ndimage.label(arr_neg)
+        band = np.ones_like(curr_map, dtype=bool)
+        band[-pad_extra:, :] = False
+        curr_map = np.where(band, curr_map, np.nan)
+        arr_pos, arr_neg =  (curr_map>pos_thresh), (curr_map<neg_thresh) # Filter by threshold
+        arr_pos, arr_neg =  ndimage.label(arr_pos), ndimage.label(arr_neg) # Connected component analysis to get individual features
 
         features = []
         for pos_or_neg, arr in enumerate([arr_pos, arr_neg]):
@@ -458,7 +599,7 @@ class PairOfDatasets(SiameseHiCDataset):
                 indices=np.where(arr[0]==feature_index)
                 if ((max(indices[0])-min(indices[0]))<=min_length )|((max(indices[1])-min(indices[1]))<=min_width): continue 
                 if ((max(indices[0])-min(indices[0]))>=max_length )|((max(indices[1])-min(indices[1]))>=max_width): continue  
-                temp = convex_hull_image(arr[0]==feature_index)
+                temp = convex_hull_image(arr[0]==feature_index) # convex hulling
                 temp = temp[np.min(indices[0]):np.max(indices[0]), np.min(indices[1]):np.max(indices[1])]
 
                 if (temp.shape[0]<=min_length )|(temp.shape[1]<=min_width): continue
@@ -466,14 +607,23 @@ class PairOfDatasets(SiameseHiCDataset):
 
                 original_dims, height= temp.shape, np.min(indices[0])
                 temp = resize(temp, (im_size,im_size),anti_aliasing=False,preserve_range=True)
-                features.append((feature_index, temp, original_dims, height, arr[1],pos_or_neg, qthresh, [chromosome, np.min(indices[0]),np.max(indices[0]), np.min(indices[1]),np.max(indices[1])]))
+                temp = np.flipud(temp) # create resized figures
+                features.append((
+                    feature_index,              # ID
+                    temp,                       # Resized convex hull mask
+                    original_dims,              # Original shape before resizing
+                    height,                     # Vertical position
+                    arr[1],                     # Number of features (label set)
+                    pos_or_neg,                 # 0 = positive, 1 = negative
+                    qthresh,                    # Quantile threshold used
+                    [chromosome,                # Genomic location metadata
+                     np.min(indices[0]),
+                     np.max(indices[0]),
+                     np.min(indices[1]),
+                     np.max(indices[1])]
+                ))
         return features
-
-    def make_maps(self,chromosome, diagonal_off=4):
-        all_maps = self.make_maps_base(chromosome, diagonal_off=diagonal_off)
-        all_maps_grouped = self.make_maps_grouped(all_maps)
-        return all_maps_grouped
-    
+        
 class Augmentations:
     """Data augmentation class for ML training. Only realistic augmentations are applied, which include poisson and random dropout. Takes in 3D tensor (1, H, W)"""
     def __init__(self):
