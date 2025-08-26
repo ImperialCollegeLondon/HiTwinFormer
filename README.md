@@ -11,7 +11,7 @@ Create conda environment with environment.yml file using: conda env create -f en
 
 2. **Create mlhic dataset**
 
-Create mlhic data with `generate_mlhic.py` script. This stores all the relebant files and groups them by experimental condition inside a json dictionary that is used throughout the rest of the pipeline
+Create mlhic data with `generate_mlhic.py` script (Need to tile along the diagonal and quality-control Hi-C data before feeding into model). This stores all the relevant files and groups them by experimental condition inside a json dictionary that is used throughout the rest of the pipeline.
 
 3. **Train models**
 
@@ -52,5 +52,11 @@ python distance_calculation_all_stats_original_version_middle.py \
 5. **Analyse results**
 
 Now, you are ready to look at the results of the model with `Example_analysis.ipynb`
+
+Below are some of the example analysis outputs:
+
+![Example Feature Extraction](feature_extraction.jpg)
+
+
 
 
