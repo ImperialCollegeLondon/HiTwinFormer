@@ -55,6 +55,13 @@ Now, you are ready to look at the results of the model with `Example_analysis.ip
 
 Below are some of the example analysis outputs:
 
+Example Embedding Distance PLot
+![Example Embedding Distance PLot](embedding_distance_plot.png)
+
+Example Feature Visualisation and Saliency Mapping
+![Example Saliencye Map](saliency_example.jpg)
+
+Feature Extraction Example
 ![Example Feature Extraction](feature_extraction.jpg)
 
 
