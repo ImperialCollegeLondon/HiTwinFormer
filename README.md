@@ -59,7 +59,7 @@ Example Embedding Distance PLot
 ![Example Embedding Distance PLot](embedding_distance_plot.png)
 
 Example Feature Visualisation and Saliency Mapping
-![Example Saliencye Map](saliency_example.jpg)
+![Example Saliency Map](saliency_example.png)
 
 Feature Extraction Example
 ![Example Feature Extraction](feature_extraction.jpg)
