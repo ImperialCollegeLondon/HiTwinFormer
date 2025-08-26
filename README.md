@@ -7,23 +7,23 @@ It is an **extension project of Twins** (https://www.nature.com/articles/s41467-
 
 1. **Create conda environment**
 
-create conda environment with environment.yml file using: conda env create -f environment.yml
+Create conda environment with environment.yml file using: conda env create -f environment.yml
 
 2. **Create mlhic dataset**
 
-create mlhic data with `generate_mlhic.py` script
+Create mlhic data with `generate_mlhic.py` script. This stores all the relebant files and groups them by experimental condition inside a json dictionary that is used throughout the rest of the pipeline
 
 3. **Train models**
 
-run `main-v3_with_supcon.py` to generate model. I recommend doing pairwise loss with 0 augmentations and varying batch sizes using both LeNet and MaxViT. Note this require wandb for training - I highly recommend using it - will remove the requirement soon.
+Run `main-v3_with_supcon.py` to generate model. I recommend doing pairwise loss with 0 augmentations and varying batch sizes using both LeNet and MaxViT. Note this requires wandb for training - I highly recommend using it - will remove the requirement soon.
 
 4. **Extract features**
 
-run `make_feature_maps.py` to make feature maps
+Run `make_feature_maps.py` to make differential cnn feature maps
 
 5. **Calculate embedding distances**
 
-run `distance_calculation_all_stats_original_version_middle.py` to generate csv's with embedding distances to simplify downstream analysis
+Run `distance_calculation_all_stats_original_version_middle.py` to generate csv's with embedding distances to simplify downstream analysis
 
 5. **Analyse results**
 
