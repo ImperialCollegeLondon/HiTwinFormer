@@ -231,7 +231,7 @@ def plot_chromosome_distances_middle_bin(
             # --- Construct DataFrame ---
             chrom_df = pd.DataFrame({
                 "Chromosome": chromosomes,
-                "Start": middle_positions,  # Using middle bin positions
+                "Middle": middle_positions,  # Using middle bin positions
                 "distances": distances,
                 "labels": subset_labels,
                 "labels_siam": np.where(labels_siam==0, "within", "between")
@@ -289,9 +289,9 @@ def plot_chromosome_distances_middle_bin(
         
         # Subsample positions for plotting
         print(f"Subsampling every {position_stride} positions for {chrom}...")
-        unique_positions = sorted(chrom_df["Start"].unique())
+        unique_positions = sorted(chrom_df["Middle"].unique())
         selected_positions = unique_positions[::position_stride]
-        plot_df = chrom_df[chrom_df["Start"].isin(selected_positions)].reset_index(drop=True)
+        plot_df = chrom_df[chrom_df["Middle"].isin(selected_positions)].reset_index(drop=True)
         
         print(f"Selected {len(plot_df)} positions for plotting {chrom}")
         chromosome_data[chrom] = plot_df
@@ -321,11 +321,11 @@ def plot_chromosome_distances_middle_bin(
         
         # Convert to Mb for plotting
         plot_df_mb = plot_df.copy()
-        plot_df_mb["Start_Mb"] = plot_df_mb["Start"] / 1_000_000
+        plot_df_mb["Middle_Mb"] = plot_df_mb["Middle"] / 1_000_000
         
         # Main plot: within vs between
         sns.lineplot(
-            x=plot_df_mb["Start_Mb"], 
+            x=plot_df_mb["Middle_Mb"], 
             y=plot_df_mb["distances"], 
             hue=plot_df_mb["labels_siam"], 
             ax=ax_main
@@ -336,7 +336,7 @@ def plot_chromosome_distances_middle_bin(
         ax_main.set_xlabel("Position (Mb)", fontsize=font_size)
         ax_main.set_ylabel("Distance", fontsize=font_size)
         ax_main.tick_params(axis='both', labelsize=font_size-2)
-        ax_main.set_xlim(plot_df_mb["Start_Mb"].min(), plot_df_mb["Start_Mb"].max())  # << fix)
+        ax_main.set_xlim(plot_df_mb["Middle_Mb"].min(), plot_df_mb["Middle_Mb"].max())  # << fix)
 
         # Set major ticks based on interval in Mb
         if major_tick_interval is not None:
@@ -357,14 +357,14 @@ def plot_chromosome_distances_middle_bin(
         if show_difference_plot:
             ax_diff = axes[idx*2 + 1]
             mean_df = (
-                plot_df_mb.groupby("Start_Mb")
+                plot_df_mb.groupby("Middle_Mb")
                 .apply(lambda g: g[g["labels_siam"]=="between"]["distances"].mean()
                                 - g[g["labels_siam"]=="within"]["distances"].mean())
                 .reset_index(name="delta_dist")
             )
             mean_df["delta_dist"] = mean_df["delta_dist"].clip(lower=0)
         
-            sns.lineplot(x="Start_Mb", y="delta_dist", data=mean_df, color="black", ax=ax_diff)
+            sns.lineplot(x="Middle_Mb", y="delta_dist", data=mean_df, color="black", ax=ax_diff)
             ax_diff.set_ylim(bottom=0)
             ax_diff.set_xlim(mean_df["Start_Mb"].min(), mean_df["Start_Mb"].max())  # << fix
             if major_tick_interval is not None:
@@ -544,9 +544,10 @@ def analyze_and_plot_hic_tiles(
     model,
     hic_files: dict,
     chrom: str,
-    start_mb: float,
-    tile1_file: str,
-    tile2_file: str,
+    start_mb: float = None,
+    middle_mb: float = None,
+    tile1_file: str = None,
+    tile2_file: str = None,
     bin_size: int = 10000,
     norm: str = "KR",
     matrix_type: str = "observed",
@@ -556,39 +557,27 @@ def analyze_and_plot_hic_tiles(
 ):
     """
     Extract Hi-C tiles, compare them using a trained model, and plot the results.
-    Automatically computes features and saliency if possible, plots what's available.
-    
-    Parameters:
-    -----------
-    model : torch.nn.Module
-        Trained SLeNet model
-    hic_files : dict
-        Dictionary with Hi-C file paths for WT/KO conditions
-    chrom : str
-        Chromosome name (e.g., 'chr1')
-    start_mb : float
-        Starting position in Mb
-    tile1_file : str
-        File name for first tile (should match exactly from hic_files)
-    tile2_file : str
-        File name for second tile (should match exactly from hic_files)
-    bin_size : int
-        Hi-C resolution in base pairs
-    norm : str
-        Normalization method
-    matrix_type : str
-        Matrix type ('observed', 'oe', etc.)
-    tile_size_mb : float
-        Size of each tile in Mb
-    distance_measure : str
-        Distance measure for saliency computation ('pairwise' or 'cosine')
-    n_steps : int
-        Number of steps for integrated gradients
-    
-    Returns:
-    --------
-    dict (optional): Contains extracted tiles, features, comparison results, and saliency maps
+
+    Parameters
+    ----------
+    start_mb : float, optional
+        Starting position in Mb. Mutually exclusive with middle_mb.
+    middle_mb : float, optional
+        Midpoint position in Mb. Mutually exclusive with start_mb.
     """
+
+    # ===== COORDINATE LOGIC =====
+    if (start_mb is None) == (middle_mb is None):
+        raise ValueError("You must provide exactly one of start_mb or middle_mb")
+
+    if middle_mb is not None:
+        start_mb = middle_mb - tile_size_mb / 2
+        end_mb = middle_mb + tile_size_mb / 2
+    else:
+        end_mb = start_mb + tile_size_mb
+
+    tile_start = int(start_mb * 1e6)
+    tile_end = int(end_mb * 1e6) - bin_size
     
     # ===== EXTRACTION FUNCTIONS =====
     def extract_tile(file_name):
@@ -614,10 +603,6 @@ def analyze_and_plot_hic_tiles(
             raise ValueError(f"Could not find file '{file_name}'. Available files: {available_files}")
         
         print(f"Using {condition_found} file: {file_name}")
-        
-        # Calculate coordinates
-        tile_start = int(start_mb * 1e6)
-        tile_end = int((start_mb + tile_size_mb) * 1e6)-bin_size
         
         # Load Hi-C data
         hf = hicstraw.HiCFile(file_path)
@@ -911,11 +896,10 @@ def plot_hic_cnn_features(
     model_name="SLeNet",
     bin_size=10000,
     patch_len=224,
-    position_stride=10,
     chunk_size=1000,
     plot_w=30,
     # New parameters for average difference calculation
-    window_mb=5,  # Window size for average calculation in Mb
+    window_mb=2.24,  # Window size for average calculation in Mb
     # Enhanced parameters for multiple distance input sources
     csv_paths=None,  # List of CSV file paths
     csv_data_list=None,  # List of DataFrames
@@ -925,6 +909,7 @@ def plot_hic_cnn_features(
     # NEW: Boolean parameters for optional features
     plot_windowed_hic_avg=True,  # Plot windowed Hi-C average line
     plot_cnn_diagonal_avg=True,  # Plot CNN diagonal average line
+    plot_cnn_column_avg=True,  # Plot CNN column average line
     plot_saliency_conditions=True,  # Plot saliency conditions map
 ):
     """
@@ -962,8 +947,6 @@ def plot_hic_cnn_features(
         Hi-C resolution in bp
     patch_len : int, default 224
         Model patch length in bins
-    position_stride : int, default 10
-        Subsampling stride in bins
     chunk_size : int, default 1000
         Bins per plotting chunk
     plot_w : float, default 20
@@ -985,6 +968,8 @@ def plot_hic_cnn_features(
         Whether to plot windowed Hi-C average line plot
     plot_cnn_diagonal_avg : bool, default True
         Whether to plot CNN diagonal average line plot
+    plot_cnn_column_avg : bool, default True
+        Whether to plot CNN column average line plot
     plot_saliency_conditions : bool, default True
         Whether to plot saliency conditions map
     """
@@ -1127,6 +1112,7 @@ def plot_hic_cnn_features(
     # CNN CONDITION MAP EXTRACTION (only if available)
     cnn_cond_map = None
     cnn_map_avg = None
+    cnn_column_avg = None
     saliency_cond_map = None
     
     if has_cnn_maps:
@@ -1224,6 +1210,25 @@ def plot_hic_cnn_features(
                     cnn_map_avg[x_pos] = np.nan
             
             print(f"Computed average features from 45° and 135° diagonals for {num_bins_cnn} bins.")
+
+        # NEW: Calculate CNN condition map column averages (only if requested)
+        if plot_cnn_column_avg:
+            print("Calculating CNN condition map column averages...")
+            
+            H, W = cnn_cond_map.shape
+            cnn_column_avg = np.zeros(W)
+            
+            # Calculate average for each column (bin)
+            for col in range(W):
+                column_values = cnn_cond_map[:, col]
+                # Remove NaN values before averaging
+                valid_values = column_values[~np.isnan(column_values)]
+                if len(valid_values) > 0:
+                    cnn_column_avg[col] = np.mean(valid_values)
+                else:
+                    cnn_column_avg[col] = np.nan
+            
+            print(f"Computed column averages for {W} bins.")
 
     
     # FIXED: Determine actual height for Hi-C plotting
@@ -1331,7 +1336,7 @@ def plot_hic_cnn_features(
         # Construct DataFrame with middle bin positions
         pos_df = pd.DataFrame({
             "Chromosome": chromosomes,
-            "Start": middle_positions,  # Using middle bin positions
+            "Middle": middle_positions,  # Using middle bin positions
             "distance": distances,  # Changed from "distances" to match expected column name
             "labels": subset_labels,
             "label_siam": np.where(labels_siam==0, "within", "between")
@@ -1423,17 +1428,16 @@ def plot_hic_cnn_features(
         pos_df = pos_df[pos_df["Chromosome"] == chrom]
         print(f"Filtered to {len(pos_df)} entries for chromosome {chrom} in {title}")
         
-        pos_df["bin_idx"] = ((pos_df["Start"] / bin_size) - start_bin).astype(int)
+        pos_df["bin_idx"] = ((pos_df["Middle"] / bin_size) - start_bin).astype(int)
         pos_df = pos_df[(pos_df["bin_idx"] >= 0) & (pos_df["bin_idx"] < num_bins)]
-        pos_df["Mb"] = pos_df["Start"] / 1e6
+        pos_df["Mb"] = pos_df["Middle"] / 1e6
         
         print(f"Filtered to {len(pos_df)} entries within the specified range for {title}")
 
         # Subsample every nth bin for plotting
         print(f"Subsampling positions for plotting {title}...")
-        unique_positions = sorted(pos_df["Start"].unique())
-        selected_positions = unique_positions[::position_stride]
-        pos_df = pos_df[pos_df["Start"].isin(selected_positions)].reset_index(drop=True)
+        unique_positions = sorted(pos_df["Middle"].unique())
+        pos_df = pos_df[pos_df["Middle"].isin(unique_positions)].reset_index(drop=True)
         print(f"Selected {len(pos_df)} positions for plotting {title}")
         
         # Calculate individual Y-axis limits for each distance plot
@@ -1509,6 +1513,8 @@ def plot_hic_cnn_features(
         num_plots += 1  # CNN conditions map
         if plot_cnn_diagonal_avg:
             num_plots += 1  # CNN map diagonal average line plot
+        if plot_cnn_column_avg:
+            num_plots += 1  # CNN map column average line plot
         if has_saliency:
             num_plots += 1  # Saliency conditions map
         if has_features:
@@ -1599,6 +1605,23 @@ def plot_hic_cnn_features(
                 
                 axs[plot_idx].plot(x_bins - bs, cnn_avg_chunk, color="blue", linewidth=1.2)
                 axs[plot_idx].set_title(f"CNN Conditions Avg (Diagonal): {mb_s:.1f}–{mb_e:.1f} Mb")
+                axs[plot_idx].set_ylabel("Avg CNN Value")
+                axs[plot_idx].set_xlim(0, w)
+                axs[plot_idx].set_xticks(xticks)
+                axs[plot_idx].set_xticklabels(xtick_labels, rotation=45)
+                axs[plot_idx].set_xlabel("Genomic Position (Mb)")
+                axs[plot_idx].grid(True, alpha=0.3)
+                
+                # Add horizontal line at y=0 for reference
+                axs[plot_idx].axhline(y=0, color='red', linestyle='--', alpha=0.5, linewidth=0.8)
+                plot_idx += 1
+
+            # 1.6) CNN Map Column Average Line Plot - NEW
+            if plot_cnn_column_avg and cnn_column_avg is not None:
+                cnn_col_avg_chunk = cnn_column_avg[bs:be]
+                
+                axs[plot_idx].plot(x_bins - bs, cnn_col_avg_chunk, color="green", linewidth=1.2)
+                axs[plot_idx].set_title(f"CNN Conditions Avg (Column): {mb_s:.1f}–{mb_e:.1f} Mb")
                 axs[plot_idx].set_ylabel("Avg CNN Value")
                 axs[plot_idx].set_xlim(0, w)
                 axs[plot_idx].set_xticks(xticks)
@@ -1729,4 +1752,4 @@ def plot_hic_cnn_features(
         plt.show()
         plot_count += 1
     
-    print(f"Completed plotting {plot_count} chunks!") 
+    print(f"Completed plotting {plot_count} chunks!")

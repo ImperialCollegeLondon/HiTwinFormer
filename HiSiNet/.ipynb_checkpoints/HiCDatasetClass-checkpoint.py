@@ -15,6 +15,7 @@ import torch
 from collections import defaultdict
 from itertools import combinations
 import random
+import torch.nn.functional as F
 
 class HiCDataset(Dataset):
     """Hi-C dataset base class"""
@@ -345,6 +346,8 @@ class PairOfDatasets(SiameseHiCDataset):
         model,
         diagonal_off=3,
         compute_saliency=False,
+        distance_measure="pairwise",  # <-- NEW
+        device=None,
         **kwargs
     ):
         """
@@ -354,50 +357,61 @@ class PairOfDatasets(SiameseHiCDataset):
             model: trained Siamese model
             diagonal_off: int, diagonal mask offset
             compute_saliency: bool, if False skips IG computations
+            distance_measure: "pairwise" (Euclidean) or "cosine"
+            device: torch.device or None (auto-detect)
         """
-        import sys
         print("[PairOfDatasets] 1: entering __init__", flush=True)
-        self.model = model.eval()
-        self._diag_off   = diagonal_off
+
+        self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model = model.to(self.device).eval()
+        self._diag_off = diagonal_off
         self.compute_sal = compute_saliency
-        self.saliency    = []  # filled in append_d
-        print("[PairOfDatasets] 2: model set", flush=True)
-        
+        self.distance_measure = distance_measure.lower()
+        self.saliency = []  # filled in append_data
+
+        print(f"[PairOfDatasets] 2: model set on {self.device}", flush=True)
+
         reference = kwargs.pop("reference", reference_genomes["mm9"])
-        print("[PairOfDatasets] 3: about to call super().__init__", flush=True)
         super().__init__(list_of_HiCDatasets, reference=reference)
-        print("[PairOfDatasets] 4: returned from super().__init__", flush=True)
-        
-        print("[PairOfDatasets] 5: computing pixel_size", flush=True)
+        print(f"[PairOfDatasets] 3: feature/saliency calculations complete", flush=True)
         self.pixel_size = int(self.resolution / self.data_res)
-        
-        print("[PairOfDatasets] 6: about to build paired_maps dict comprehension", flush=True)
+        print(f"[PairOfDatasets] 4: Start map creation", flush=True)
         self.paired_maps = {
-            chrom: self.make_maps(chrom)
+            chrom: self.make_maps_combined(chrom)
             for chrom in self.chromosomes
         }
-        print("[PairOfDatasets] 7: finished building paired_maps", flush=True)
+        print("[PairOfDatasets] init complete", flush=True)
 
-    
-    def make_maps(self, chromosome):
-        print(f"started map making for {chromosome}", flush=True)
-        base = self.make_maps_base(chromosome)
-        return self.make_maps_grouped(base)
+    def _compute_distance(self, o1, o2):
+        """Helper: compute distance between embeddings"""
+        if self.distance_measure == "cosine":
+            return 1 - F.cosine_similarity(o1, o2)
+        elif self.distance_measure == "pairwise":
+            return F.pairwise_distance(o1, o2)
+        else:
+            raise ValueError(f"Unknown distance measure: {self.distance_measure}")
 
     def integrated_gradients(self, x1, x2, n_steps=50):
         """Compute 2D IG saliency for embedding‐distance between x1,x2."""
-        device = x1.device
-        tg1 = torch.zeros_like(x1, device=device)
-        tg2 = torch.zeros_like(x2, device=device)
+        #x1, x2 = x1.to(self.device), x2.to(self.device)
+        tg1 = torch.zeros_like(x1, device=self.device)
+        tg2 = torch.zeros_like(x2, device=self.device)
 
         for alpha in np.linspace(0, 1, n_steps):
-            xi1 = (x2 + alpha*(x1 - x2)).detach().requires_grad_(True)
-            xi2 = (x1 + alpha*(x2 - x1)).detach().requires_grad_(True)
+            xi1 = (x2 + alpha * (x1 - x2)).detach().requires_grad_(True)
+            xi2 = (x1 + alpha * (x2 - x1)).detach().requires_grad_(True)
 
-            d1 = torch.norm(self.model.forward_one(xi1) - self.model.forward_one(x2), 2) # Euclidian distance calculation
-            d2 = torch.norm(self.model.forward_one(x1)  - self.model.forward_one(xi2), 2)
+            # embeddings
+            f1_xi1 = self.model.forward_one(xi1)
+            f1_x2  = self.model.forward_one(x2)
+            f1_x1  = self.model.forward_one(x1)
+            f1_xi2 = self.model.forward_one(xi2)
 
-            self.model.zero_grad(); d1.backward()
+            # distance based on user choice
+            d1 = self._compute_distance(f1_xi1, f1_x2).sum()
+            d2 = self._compute_distance(f1_x1,  f1_xi2).sum()
+
+            self.model.zero_grad(); d1.backward(retain_graph=True)
             tg1 += xi1.grad; xi1.grad.zero_()
             self.model.zero_grad(); d2.backward()
             tg2 += xi2.grad; xi2.grad.zero_()
@@ -407,79 +421,110 @@ class PairOfDatasets(SiameseHiCDataset):
         ig1 = (x1 - x2) * ag1
         ig2 = (x2 - x1) * ag2
         comb = 0.5 * (ig1 + ig2)
-        heatmap = comb.mean(dim=1).squeeze().cpu().numpy()  # (H,W)
+        heatmap = comb.mean(dim=1).squeeze()
         return heatmap
 
-    def append_data(self, curr_data, pos, chrom): # Class replaces old append_data from Siamese dataset creation call during init. 
-        data_list, sal_list = [], []
-
+    def append_data(self, curr_data, pos, chrom):
+        feature_list, saliency_list = [], []
+    
         if len(curr_data) < 2:
             return
+    
         H = curr_data[0][0].shape[-1]
         band = (
-            np.tril(np.ones((H,H)),  k=-self._diag_off)
-          + np.triu(np.ones((H,H)),  k= self._diag_off)
+            np.tril(np.ones((H, H)), k=-self._diag_off)
+            + np.triu(np.ones((H, H)), k=self._diag_off)
         ).astype(float)
-        diag_mask = torch.from_numpy(band).float().to(curr_data[0][0].device)
-
+        diag_mask = torch.from_numpy(band).float().to(self.device)
+    
         for i, (img_i, ci) in enumerate(curr_data):
-            for j, (img_j, cj) in enumerate(curr_data[i+1:], start=i+1):
-                mi = img_i * diag_mask
-                mj = img_j * diag_mask
-
-                fi = self.model.features(mi.unsqueeze(0)).abs()
-                fj = self.model.features(mj.unsqueeze(0)).abs()
-                if ci != cj:
-                    diff = fi - fj if (ci==1 and cj==0) else fj - fi # Calculate difference between treatment and control class tiles 
+            for j, (img_j, cj) in enumerate(curr_data[i + 1:], start=i + 1):
+                
+                mi = img_i.to(self.device)
+                mj = img_j.to(self.device)
+    
+                if mi.max() > 0:
+                    mi = mi / mi.max()
+                if mj.max() > 0:
+                    mj = mj / mj.max()
+    
+                # ---- Apply diagonal mask ----
+                mi = mi * diag_mask
+                mj = mj * diag_mask
+    
+                # ---- Feature maps (if available) ----
+                if hasattr(self.model, "features"):
+                    fi = self.model.features(mi.unsqueeze(0)).abs()
+                    fj = self.model.features(mj.unsqueeze(0)).abs()
+    
+                    if ci != cj:
+                        diff = fi - fj if (ci == 1 and cj == 0) else fj - fi
+                    else:
+                        diff = fi - fj
+    
+                    feature_list.append(diff)  # keep on GPU
                 else:
-                    diff = fi - fj
-
-                data_list.append(diff.detach().cpu().numpy()[0])
-
-                # Only compute saliency for between-class comparisons
-                if self.compute_sal:
+                    feature_list.append(torch.zeros((1, H, H), device=self.device))
+    
+                # ---- Saliency maps (if available) ----
+                if self.compute_sal and ci != cj:
                     s_map = self.integrated_gradients(
-                        mi.unsqueeze(0), mj.unsqueeze(0), n_steps=50
+                        mi.unsqueeze(0), mj.unsqueeze(0), n_steps=100
                     )
+                    saliency_list.append(s_map)  # keep on GPU
                 else:
-                    s_map = np.zeros((H, H), dtype=float)
-                sal_list.append(s_map)
-
-        L = len(data_list)
-        self.data     .extend(data_list)
-        self.saliency .extend(sal_list)
-        self.positions.extend([pos]*L)
-        self.labels   .extend([
-            (a,b) for a in range(len(curr_data)) for b in range(a+1, len(curr_data))
+                    #saliency_list.append(torch.zeros((H, H), device=self.device))
+                    pass
+    
+        # Move everything to CPU / numpy **once** after loop
+        feature_cpu = [f.detach().cpu().numpy()[0] for f in feature_list]
+        saliency_cpu = [s.detach().cpu().numpy() for s in saliency_list]
+    
+        L = len(feature_cpu)
+        self.data.extend(feature_cpu)
+        self.saliency.extend(saliency_cpu)
+        self.positions.extend([pos] * L)
+        self.labels.extend([
+            (a, b) for a in range(len(curr_data)) for b in range(a + 1, len(curr_data))
         ])
-        self.pos      .extend([(pos,chrom)]*L)
+        self.pos.extend([(pos, chrom)] * L)
 
-    def make_maps_base(self, chromosome):
-        nfilter = self.model.features[-2].out_channels # 16 channels in LeNet
-        chrom_i, chrom_j = self.chromosomes[chromosome] # chrom_i is index of data at max position and chrom_j at min position
+    def make_maps_combined(self, chromosome):
+        print(f"Started creating differential feature map for {chromosome}")
+        nfilter = self.model.features[-2].out_channels
+        chrom_i, chrom_j = self.chromosomes[chromosome]
         if chrom_i == chrom_j:
             return None
-
+    
         length    = int((self.positions[chrom_i] + self.resolution) / self.data_res)
         dims_feat = (nfilter, self.pixel_size, length)
         dims_sal  = (self.pixel_size, length)
-
-        pair_maps = {
-            pair: {
-                "rotated_shapes": np.zeros(dims_feat),
-                "norm"          : np.zeros(dims_feat),
-                "saliency"      : np.zeros(dims_sal),
-                "sal_norm"      : np.zeros(dims_sal),
-            }
-            for pair in self.labels
+    
+        # allocate both accumulators and norms
+        grouped = {
+            "replicate"          : np.zeros(dims_feat),
+            "conditions"         : np.zeros(dims_feat),
+            #"saliency_replicate" : np.zeros(dims_sal),
+            "saliency_conditions": np.zeros(dims_sal),
         }
-
+        norms = {
+            "replicate"          : np.zeros(dims_feat),
+            "conditions"         : np.zeros(dims_feat),
+            #"saliency_replicate" : np.zeros(dims_sal),
+            "saliency_conditions": np.zeros(dims_sal),
+        }
+    
         for idx in range(chrom_j, chrom_i, -1):
             true    = idx - 1
             pair    = self.labels[true]
             pos_bin = int(self.positions[true] / self.data_res)
-
-            # 1) rotate and tile feature‐maps
+    
+            typ = ("replicate"
+                   if self.metadata[pair[0]]["class_id"]
+                      == self.metadata[pair[1]]["class_id"]
+                   else "conditions")
+    
+            # feature maps
             for f in range(nfilter):
                 x = self.data[true][f]
                 x = (x + x.T) / 2
@@ -488,18 +533,13 @@ class PairOfDatasets(SiameseHiCDataset):
                                   (self.pixel_size, self.pixel_size),
                                   preserve_range=True,
                                   anti_aliasing=False)
-                pair_maps[pair]["rotated_shapes"][f,
-                                                   :,
-                                                   pos_bin:pos_bin+self.pixel_size] += small_f # place symmetrised and rotated featured difference tile on map
-                pair_maps[pair]["norm"         ][f,
-                                                   :,
-                                                   pos_bin:pos_bin+self.pixel_size] += 1
-
-            # 2) rotate and tile saliency map (for all comparisons)
+                grouped[typ][f, :, pos_bin:pos_bin+self.pixel_size] += small_f
+                norms[typ][f, :, pos_bin:pos_bin+self.pixel_size]   += 1
+    
+            # saliency maps
             if self.compute_sal:
-                s = self.saliency[true]        # (H, W)
+                s = self.saliency[true]
                 H, W = s.shape
-                # Create the diagonal mask
                 band = (
                     np.tril(np.ones((H, W)), k=-self._diag_off)
                     + np.triu(np.ones((H, W)), k=self._diag_off)
@@ -511,67 +551,16 @@ class PairOfDatasets(SiameseHiCDataset):
                                  (self.pixel_size, self.pixel_size),
                                  preserve_range=True,
                                  anti_aliasing=False)
-                pair_maps[pair]["saliency"][:, pos_bin:pos_bin+self.pixel_size] += small_s # Same as above but for saliency
-                pair_maps[pair]["sal_norm"][:, pos_bin:pos_bin+self.pixel_size] += 1
-                
-        print(f"created {chromosome} map", flush=True)
-        # finalize averages
-        all_maps = {}
-        for pair, vals in pair_maps.items():
-            feat = vals["rotated_shapes"] / vals["norm"] # calculate average map
-            if self.compute_sal:
-                sal = vals["saliency"] / vals["sal_norm"]
-            else:
-                sal = vals["saliency"]  # Will be zeros when saliency is disabled
-            all_maps[pair] = {"replicate": feat,
-                              "saliency" : sal}
-        print(f"normalised {chromosome} map", flush=True)
-        return all_maps
-
-    def make_maps_grouped(self, all_maps):
-        """ Groups paired maps by condition (replicate or condition) """
-        if all_maps is None:
-            return None
-        print(f"started grouping maps", flush=True)
-        grouped = {"replicate": None, "conditions": None, "saliency_replicate": None, "saliency_conditions": None}
-        counts  = {"replicate": 0, "conditions": 0, "sal_replicate": 0, "sal_conditions": 0}
-        
-        for pair, mp in all_maps.items():
-            typ = ("replicate"
-                   if self.metadata[pair[0]]["class_id"]
-                      == self.metadata[pair[1]]["class_id"]
-                   else "conditions")
-            
-            # accumulate feature maps
-            arr = mp["replicate"]
-            if grouped[typ] is None:
-                grouped[typ] = arr.copy()
-            else:
-                grouped[typ] += arr
-            counts[typ] += 1
-
-            # accumulate saliency maps separately for replicate and conditions
-            sal = mp["saliency"]
-            sal_key = f"saliency_{typ}"
-            count_key = f"sal_{typ}"
-            
-            if grouped[sal_key] is None:
-                grouped[sal_key] = sal.copy()
-            else:
-                grouped[sal_key] += sal
-            counts[count_key] += 1
-
-        # divide by counts
-        for k in ("replicate", "conditions"):
-            if grouped[k] is not None and counts[k] > 0:
-                grouped[k] /= counts[k]
-                
-        for k in ("saliency_replicate", "saliency_conditions"):
-            count_key = k.replace("saliency_", "sal_")
-            if grouped[k] is not None and counts[count_key] > 0:
-                grouped[k] /= counts[count_key]
-                
-        print(f"finished grouping maps", flush=True)
+                sal_key = f"saliency_{typ}"
+                grouped[sal_key][:, pos_bin:pos_bin+self.pixel_size] += small_s
+                norms[sal_key][:, pos_bin:pos_bin+self.pixel_size]   += 1
+    
+        # normalize element-wise
+        for k in grouped:
+            with np.errstate(divide='ignore', invalid='ignore'):
+                grouped[k] = np.where(norms[k] > 0, grouped[k] / norms[k], 0.0)
+    
+        print(f"created grouped map for {chromosome}", flush=True)
         return grouped
 
     def extract_features(self, chromosome, nfilter, pair, qthresh=0.999, min_length=10, max_length=256, min_width=10,max_width=256, pad_extra=3, im_size=20):
@@ -615,12 +604,12 @@ class PairOfDatasets(SiameseHiCDataset):
                     height,                     # Vertical position
                     arr[1],                     # Number of features (label set)
                     pos_or_neg,                 # 0 = positive, 1 = negative
-                    qthresh,                    # Quantile threshold used
-                    [chromosome,                # Genomic location metadata
-                     np.min(indices[0]),
-                     np.max(indices[0]),
-                     np.min(indices[1]),
-                     np.max(indices[1])]
+                    qthresh,                    # Quantile intensity threshold used
+                    [chromosome,                # Genomic location metadata, chromosome number
+                     np.min(indices[0]),        # y0
+                     np.max(indices[0]),        # y1
+                     np.min(indices[1]),        # x0    
+                     np.max(indices[1])]        # x1
                 ))
         return features
         

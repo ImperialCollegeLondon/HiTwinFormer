@@ -9,13 +9,19 @@ from torchvision import transforms
 from torch.autograd import Variable
 import argparse
 import json
-import wandb
 from HiSiNet.HiCDatasetClass import HiCDatasetDec, SiameseHiCDataset, Augmentations
 import HiSiNet.models as models
 from torch_plus.loss import ContrastiveLoss, MultiviewSINCERELoss
 from HiSiNet.reference_dictionaries import reference_genomes
 from collections import defaultdict
 
+# Try to import wandb, but make it optional
+try:
+    import wandb
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
+    print("Warning: wandb not available. Logging will be disabled.")
 
 # Argument parsing
 parser = argparse.ArgumentParser(description='Siamese network')
@@ -39,6 +45,7 @@ parser.add_argument('--experiment_name', default="", type=str, help='name for wa
 parser.add_argument('--test_version', default="", type=str, help='for rerunning same run')
 parser.add_argument('--mixed_precision', type=bool, default=True, help='Enable mixed precision training')
 parser.add_argument('--optimiser', type=str, default="Adam", choices=['Adam','Adagrad'], help="optimiser")
+parser.add_argument('--use_wandb', action='store_true', help='Enable wandb logging')
 
 args = parser.parse_args()
 
@@ -47,12 +54,29 @@ loss_function = loss_function.lower()
 use_amp = args.mixed_precision
 optimiser_name = args.optimiser
 
-# Initialize wandb
-wandb.init(
-    project=f"HiSiNet_{args.experiment_name}",
-    name=f"{args.model_name}_lr{args.learning_rate}_bs{args.batch_size}_seed{args.seed}_lf{args.loss}_num_aug{args.n_aug}_{args.experiment_name}_{args.test_version}_{optimiser_name}",
-    config=vars(args)
-)
+# Initialize wandb only if requested and available
+if args.use_wandb and WANDB_AVAILABLE:
+    wandb.init(
+        project=f"HiSiNet_{args.experiment_name}",
+        name=f"{args.model_name}_lr{args.learning_rate}_bs{args.batch_size}_seed{args.seed}_lf{args.loss}_num_aug{args.n_aug}_{args.experiment_name}_{args.test_version}_{optimiser_name}",
+        config=vars(args)
+    )
+    print("Wandb logging enabled")
+elif args.use_wandb and not WANDB_AVAILABLE:
+    print("Warning: wandb requested but not available. Continuing without logging.")
+else:
+    print("Wandb logging disabled")
+
+# Helper function for logging
+def log_metrics(metrics_dict):
+    """Log metrics to wandb if available and enabled, otherwise print to console"""
+    if args.use_wandb and WANDB_AVAILABLE:
+        wandb.log(metrics_dict)
+    else:
+        # Print metrics to console
+        metric_str = " | ".join([f"{k}: {v:.6f}" if isinstance(v, float) else f"{k}: {v}" 
+                                for k, v in metrics_dict.items()])
+        print(metric_str)
 
 # Set device and seed
 cuda = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -232,10 +256,12 @@ for epoch in range(1, args.epoch_training + 1):
                 control_tensor = torch.stack(control_aug)
                 treatment_tensor = torch.stack(treatment_aug)
                 all_views = torch.cat([control_tensor, treatment_tensor], dim=0)
-                all_views = augmentor.normalize(all_views).to(cuda) # need to normalise since are using forward_one instead of forward
+                all_views = augmentor.normalize(all_views).to(cuda)
 
                 with torch.autocast(device_type='cuda', enabled= use_amp):
                     features = model.forward_one(all_views)
+                    features = F.normalize(features, dim=1)
+
                     n_control = control_tensor.shape[0]
 
                     tile_loss_info = torch.stack([
@@ -270,8 +296,8 @@ for epoch in range(1, args.epoch_training + 1):
     with torch.no_grad():
         if loss_function == "contrastive":
             for x1, x2, labels in val_loader:
-                x1 = x1.to(cuda)
-                x2 = x2.to(cuda)
+                x1 = augmentor.normalize(x1).to(cuda)
+                x2 = augmentor.normalize(x2).to(cuda)
                 labels = labels.to(cuda).float()
                 with torch.autocast(device_type="cuda", enabled= use_amp):
                     feat1, feat2 = model(x1, x2)
@@ -305,10 +331,11 @@ for epoch in range(1, args.epoch_training + 1):
                     control_tensor   = torch.stack(control_views).to(cuda)
                     treatment_tensor = torch.stack(treatment_views).to(cuda)
                     all_views        = torch.cat([control_tensor, treatment_tensor], dim=0)
-                    all_views        = augmentor.normalize(all_views).to(cuda) # need to normalise since are using forward_one instead of forward
+                    all_views        = augmentor.normalize(all_views).to(cuda)
 
                     with torch.autocast(device_type='cuda', enabled= use_amp):
                         features = model.forward_one(all_views)
+                        features = F.normalize(features, dim=1)
         
                         n_control = control_tensor.shape[0]
                         
@@ -324,7 +351,6 @@ for epoch in range(1, args.epoch_training + 1):
             avg_val_cont = total_loss / total_tiles
 
     # Logging
-    
     metrics = {
         "epoch": epoch,
         f"train_{loss_function}_loss": avg_train_cont,
@@ -333,12 +359,10 @@ for epoch in range(1, args.epoch_training + 1):
     }
     if loss_function == "contrastive":
         metrics["train_class_loss"] = avg_train_class
-    wandb.log(metrics)
+    
+    log_metrics(metrics)
 
-    #print(f"Epoch [{epoch}/{args.epoch_training}] Train Contrastive: {avg_train_cont:.6f}  "
-          #f"Train Classification: {avg_train_class:.6f}  Validation Contrastive: {avg_val_cont:.6f}")
-
-        # Save best model
+    # Save best model
     if avg_val_cont + args.min_delta < best_val_loss:
         no_improved_epochs = 0
         best_val_loss = avg_val_cont
@@ -357,5 +381,6 @@ for epoch in range(1, args.epoch_training + 1):
         print(f"Validation loss rose from {best_val_loss:.6f} to {avg_val_cont:.6f}. Stopping early.")
         break
 
-
-wandb.finish()
+# Clean up wandb if it was used
+if args.use_wandb:
+    wandb.finish()
