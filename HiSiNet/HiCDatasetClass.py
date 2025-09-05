@@ -19,7 +19,7 @@ import torch.nn.functional as F
 
 class HiCDataset(Dataset):
     """Hi-C dataset base class"""
-    def __init__(self, metadata, data_res, resolution, stride=8, exclude_chroms=['chrY','chrX', 'Y', 'X', 'chrM', 'M'], reference = 'mm9', normalise = False):
+    def __init__(self, metadata, data_res, resolution, stride=8, exclude_chroms=['chrY','chrX', 'Y', 'X', 'chrM', 'M'], reference = 'mm9'):
         """
         Args:
         metadata: A list consisting of
@@ -30,13 +30,12 @@ class HiCDataset(Dataset):
             class id: containing an integer specifying the biological condition of the Hi-C file.
         data_res: The resolution for the Hi-C to be called in base pairs.
         resolution: the size of the overall region to be considered.
-        stride: (optional) gives the number of images which overlap.
+        stride: Number of tiles which overlap.
         """
         self.reference, self.data_res, self.resolution, self.stride_length,  self.pixel_size = reference, data_res, resolution, int(resolution/stride), int(resolution/data_res)
         self.metadata = {'filename': metadata[0], 'replicate': metadata[1], 'norm': metadata[2], 'type_of_bin': metadata[3], 'class_id': metadata[4], 'chromosomes': OrderedDict()}
         self.positions = []
         self.chrom_pos = []
-        self.normalise = normalise
         self.exclude_chroms = exclude_chroms +['All', 'ALL', 'all'] 
         self.data = []
 
@@ -190,15 +189,33 @@ class SiameseHiCDataset(HiCDataset):
             if not isinstance(data, HiCDataset):
                 print("List of HiCDatasets need to be a list containing only HiCDataset objects.")
                 return False
-            # if (data.metadata['filename'], data.metadata['norm']) in filenames_norm:
-            #     print("file has been passed twice with the same normalisation") #maybe make this a warning instead of not doing it
+
             filenames_norm.add((data.metadata['filename'], data.metadata['norm']))
         return True
 
     def check_input_parameters(self, dataset): #where we check if the dataset is compatible with what we want to do
         pass
 
-
+    def make_data(self, list_of_HiCDatasets):
+        datasets = len(list_of_HiCDatasets)
+        
+        for chrom in self.chromsizes.keys(): # For each chromosome
+            start_index = len(self.positions) # starts at 0 
+            starts, positions = [], [] # Start indexes and positions (say index 1, 1000bp)
+            for i in range(0, datasets): # For each dataset
+                start, end = list_of_HiCDatasets[i].metadata['chromosomes'].setdefault(chrom, (0,0)) # Fetch the start and end indices for the chromosome
+                starts.append(start)
+                positions.append(list(list_of_HiCDatasets[i].positions[start:end])) # Extract all start positions of all index position tiles in a dataset (from start to end index)
+            for pos in range(0, self.chromsizes[chrom], self.stride_length)[::-1]: # For each position in each chromosome in reverse order
+                curr_data = []
+                for i in range(0,datasets): # For each dataset
+                    if positions[i][-1:]!=[pos]: continue # If the last start position in [positions] doesn't match pos in the last position, then skip it.
+                    curr_data.append(list_of_HiCDatasets[i][starts[i]+len(positions[i])-1] ) # Grab the relevant tile and class ID and add to current data 
+                    positions[i].pop() # Remove last index position from positions list and continue loop to match positions[-1:] to pos
+                self.append_data(curr_data, pos, chrom) # Now, once all instances of the same start position is found from each dataset being compared, create pairs of data at that position
+            self.chromosomes[chrom] = (start_index,len(self.positions)) # start index to end index (self.positions has new number of positions after append_data)
+        self.data = tuple(self.data) # Fixed data now
+    
     def append_data(self, curr_data, pos, chrom):
         """
         curr_data: list of (image, class_label) for a single genomic coordinate
@@ -277,25 +294,6 @@ class SiameseHiCDataset(HiCDataset):
             self.pos.extend([(pos, chrom) for k in range(0,len(curr_data)) for j in range(k+1,len(curr_data))])
             self.labels.extend( [( k, j) for k in range(0,len(curr_data)) for j in range(k+1,len(curr_data))]) # add labels list to [labels] of which pairs are being compared 
 
-    def make_data(self, list_of_HiCDatasets):
-        datasets = len(list_of_HiCDatasets)
-        
-        for chrom in self.chromsizes.keys(): # For each chromosome
-            start_index = len(self.positions) # starts at 0 
-            starts, positions = [], [] # Start indexes and positions (say index 1, 1000bp)
-            for i in range(0, datasets): # For each dataset
-                start, end = list_of_HiCDatasets[i].metadata['chromosomes'].setdefault(chrom, (0,0)) # Fetch the start and end indices for the chromosome
-                starts.append(start)
-                positions.append(list(list_of_HiCDatasets[i].positions[start:end])) # Extract all start positions of all index position tiles in a dataset (from start to end index)
-            for pos in range(0, self.chromsizes[chrom], self.stride_length)[::-1]: # For each position in each chromosome in reverse order
-                curr_data = []
-                for i in range(0,datasets): # For each dataset
-                    if positions[i][-1:]!=[pos]: continue # If the last start position in [positions] doesn't match pos in the last position, then skip it.
-                    curr_data.append(list_of_HiCDatasets[i][starts[i]+len(positions[i])-1] ) # Grab the relevant tile and class ID and add to current data 
-                    positions[i].pop() # Remove last index position from positions list and continue loop to match positions[-1:] to pos
-                self.append_data(curr_data, pos, chrom) # Now, once all instances of the same start position is found from each dataset being compared, create pairs of data at that position
-            self.chromosomes[chrom] = (start_index,len(self.positions)) # start index to end index (self.positions has new number of positions after append_data)
-        self.data = tuple(self.data) # Fixed data now
 
 class HiCDatasetCool(HiCDataset):
     """Hi-C dataset loader"""
@@ -594,25 +592,31 @@ class PairOfDatasets(SiameseHiCDataset):
                 if (temp.shape[0]<=min_length )|(temp.shape[1]<=min_width): continue
                 if (temp.shape[0]>=max_length )|(temp.shape[1]>=max_width): continue
 
-                original_dims, height= temp.shape, np.min(indices[0])
-                temp = resize(temp, (im_size,im_size),anti_aliasing=False,preserve_range=True)
-                temp = np.flipud(temp) # create resized figures
+                # compute average pixel value inside feature region
+                mask_y0, mask_y1 = np.min(indices[0]), np.max(indices[0])
+                mask_x0, mask_x1 = np.min(indices[1]), np.max(indices[1])
+                region = curr_map[mask_y0:mask_y1, mask_x0:mask_x1]
+                avg_value = np.nanmean(region[temp.astype(bool)])  # masked average
+        
+                # resize hull for visualization
+                original_dims, height = temp.shape, np.min(indices[0])
+                temp = resize(temp, (im_size, im_size), anti_aliasing=False, preserve_range=True)
+                temp = np.flipud(temp)
+                
                 features.append((
                     feature_index,              # ID
                     temp,                       # Resized convex hull mask
                     original_dims,              # Original shape before resizing
                     height,                     # Vertical position
-                    arr[1],                     # Number of features (label set)
+                    avg_value,                  # feature change strength (average CNN difference map value)
                     pos_or_neg,                 # 0 = positive, 1 = negative
                     qthresh,                    # Quantile intensity threshold used
-                    [chromosome,                # Genomic location metadata, chromosome number
-                     np.min(indices[0]),        # y0
-                     np.max(indices[0]),        # y1
-                     np.min(indices[1]),        # x0    
-                     np.max(indices[1])]        # x1
-                ))
+                    [chromosome,                # Genomic location metadata
+                     mask_y0, mask_y1,
+                     mask_x0, mask_x1]
+                        ))
         return features
-        
+
 class Augmentations:
     """Data augmentation class for ML training. Only realistic augmentations are applied, which include poisson and random dropout. Takes in 3D tensor (1, H, W)"""
     def __init__(self):

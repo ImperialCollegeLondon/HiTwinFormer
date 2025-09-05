@@ -11,14 +11,14 @@ dependencies:
   - frozendict
   - cython
   - scikit-image
+  - scikit-learn
   - seaborn
   - ipykernel
   - jupyter
-  # Install your package (setup.py) via pip in editable mode
   - pip
   - pip:
-    - torch
-    - torchvision 
+    - torch == 2.7.0
+    - torchvision == 0.22.0
     - cooler
     - hic-straw
     - wandb

@@ -16,25 +16,40 @@ conda activate hisinet_test
 
 cd /home/tt920/HiTwinFormer
 
-#python main-v3_with_supcon.py SLeNet D4_CTCF_224.json 0.01 control KO --mask True --outpath /home/tt920/HiTwinFormer/model_outputs/ --epoch_enforced_training 20 --batch_size 128 --loss triplet --n_aug 0 --experiment_name D4_CTCF_new --patience 3
+# Pairwise Contrastive
 
-#python main-v3_with_supcon.py SLeNet D4_CTCF_224.json 0.01 control KO --mask True --outpath /home/tt920/HiTwinFormer/model_outputs/ --epoch_enforced_training 20 --batch_size 128 --loss triplet --n_aug 1 --experiment_name D4_CTCF_new --patience 3
+python main_final.py SLeNet D4_CTCF_224.json 0.0001 control KO --mask True --outpath /home/tt920/HiTwinFormer/model_outputs/ctcf_final/ --epoch_enforced_training 10 --batch_size 128 --loss contrastive --n_aug 0 --experiment_name D4_CTCF_new --optimiser Adam --patience 3 --use_wandb
 
-#python main-v3_with_supcon.py SLeNet D4_CTCF_224.json 0.01 control KO --mask True --outpath /home/tt920/HiTwinFormer/model_outputs/ --epoch_enforced_training 20 --batch_size 128 --loss triplet --n_aug 2 --experiment_name D4_CTCF_new --patience 3
+python main_final.py SLeNet D4_CTCF_224.json 0.0001 control KO --mask True --outpath /home/tt920/HiTwinFormer/model_outputs/ctcf_final/ --epoch_enforced_training 10 --batch_size 64 --loss contrastive --n_aug 0 --experiment_name D4_CTCF_new --optimiser Adam --patience 3 --use_wandb
 
-#python main-v3_with_supcon.py SLeNet D4_CTCF_224.json 0.01 control KO --mask True --outpath /home/tt920/HiTwinFormer/model_outputs/ --epoch_enforced_training 20 --batch_size 128 --loss contrastive --n_aug 0 --experiment_name D4_CTCF_new  --patience 3
+python main_final.py SLeNet D4_CTCF_224.json 0.0001 control KO --mask True --outpath /home/tt920/HiTwinFormer/model_outputs/ctcf_final/ --epoch_enforced_training 10 --batch_size 32 --loss contrastive --n_aug 0 --experiment_name D4_CTCF_new --optimiser Adam --patience 3 --use_wandb
 
-#python main-v3_with_supcon.py SLeNet D4_CTCF_224.json 0.01 control KO --mask True --outpath /home/tt920/HiTwinFormer/model_outputs/ --epoch_enforced_training 20 --batch_size 128 --loss contrastive --n_aug 1 --experiment_name D4_CTCF_new  --patience 3
+python main_final.py SLeNet D4_CTCF_224.json 0.0001 control KO --mask True --outpath /home/tt920/HiTwinFormer/model_outputs/ctcf_final/ --epoch_enforced_training 10 --batch_size 8 --loss contrastive --n_aug 0 --experiment_name D4_CTCF_new --optimiser Adam --patience 3 --use_wandb
 
-#python main-v3_with_supcon.py SLeNet D4_CTCF_224.json 0.01 control KO --mask True --outpath /home/tt920/HiTwinFormer/model_outputs/ --epoch_enforced_training 20 --batch_size 128 --loss contrastive --n_aug 2 --experiment_name D4_CTCF_new  --patience 3
+python main_final.py SLeNet D4_CTCF_224.json 0.0001 control KO --mask True --outpath /home/tt920/HiTwinFormer/model_outputs/ctcf_final/ --epoch_enforced_training 10 --batch_size 4 --loss contrastive --n_aug 0 --experiment_name D4_CTCF_new --optimiser Adam --patience 3 --use_wandb
 
-#python main-v3_with_supcon.py SLeNet D4_CTCF_224.json 0.01 control KO --mask True --outpath /home/tt920/HiTwinFormer/model_outputs/ --epoch_enforced_training 20 --batch_size 128 --loss supcon --n_aug 0 --experiment_name D4_CTCF_new --patience 3
+# Triplet
 
-#python main-v3_with_supcon.py SLeNet D4_CTCF_224.json 0.01 control KO --mask True --outpath /home/tt920/HiTwinFormer/model_outputs/ --epoch_enforced_training 20 --batch_size 128 --loss supcon --n_aug 1 --experiment_name D4_CTCF_new --patience 3
+python main_final.py SLeNet D4_CTCF_224.json 0.0001 control KO --mask True --outpath /home/tt920/HiTwinFormer/model_outputs/ctcf_final/ --epoch_enforced_training 10 --batch_size 128 --loss triplet --n_aug 0 --experiment_name D4_CTCF_new --optimiser Adam --patience 3 --use_wandb
 
-python main-v3_with_supcon.py SLeNet D4_CTCF_224.json 0.1 control KO --mask True --outpath /home/tt920/HiTwinFormer/model_outputs/ --epoch_enforced_training 20 --batch_size 128 --loss supcon --n_aug 2 --experiment_name D4_CTCF_new --patience 3 --test_version 0
+python main_final.py SLeNet D4_CTCF_224.json 0.0001 control KO --mask True --outpath /home/tt920/HiTwinFormer/model_outputs/ctcf_final/ --epoch_enforced_training 10 --batch_size 64 --loss triplet --n_aug 0 --experiment_name D4_CTCF_new --optimiser Adam --patience 3 --use_wandb
 
-#python main-v3_with_supcon.py SLeNet D4_CTCF_224.json 0.01 control KO --mask True --outpath /home/tt920/HiTwinFormer/model_outputs/ --epoch_enforced_training 20 --batch_size 128 --loss supcon --n_aug 4 --experiment_name D4_CTCF_new --patience 3
+python main_final.py SLeNet D4_CTCF_224.json 0.0001 control KO --mask True --outpath /home/tt920/HiTwinFormer/model_outputs/ctcf_final/ --epoch_enforced_training 10 --batch_size 32 --loss triplet --n_aug 0 --experiment_name D4_CTCF_new --optimiser Adam --patience 3 --use_wandb
 
+python main_final.py SLeNet D4_CTCF_224.json 0.0001 control KO --mask True --outpath /home/tt920/HiTwinFormer/model_outputs/ctcf_final/ --epoch_enforced_training 10 --batch_size 8 --loss triplet --n_aug 0 --experiment_name D4_CTCF_new --optimiser Adam --patience 3 --use_wandb
+
+python main_final.py SLeNet D4_CTCF_224.json 0.0001 control KO --mask True --outpath /home/tt920/HiTwinFormer/model_outputs/ctcf_final/ --epoch_enforced_training 10 --batch_size 4 --loss triplet --n_aug 0 --experiment_name D4_CTCF_new --optimiser Adam --patience 3 --use_wandb
+
+# Supcon
+
+python main_final.py SLeNet D4_CTCF_224.json 0.0001 control KO --mask True --outpath /home/tt920/HiTwinFormer/model_outputs/ctcf_final/ --epoch_enforced_training 10 --batch_size 64 --loss supcon --n_aug 2 --experiment_name D4_CTCF_new --optimiser Adam --patience 3 --use_wandb
+
+python main_final.py SLeNet D4_CTCF_224.json 0.0001 control KO --mask True --outpath /home/tt920/HiTwinFormer/model_outputs/ctcf_final/ --epoch_enforced_training 10 --batch_size 32 --loss supcon --n_aug 2 --experiment_name D4_CTCF_new --optimiser Adam --patience 3 --use_wandb
+
+python main_final.py SLeNet D4_CTCF_224.json 0.0001 control KO --mask True --outpath /home/tt920/HiTwinFormer/model_outputs/ctcf_final/ --epoch_enforced_training 10 --batch_size 16 --loss supcon --n_aug 2 --experiment_name D4_CTCF_new --optimiser Adam --patience 3 --use_wandb
+
+python main_final.py SLeNet D4_CTCF_224.json 0.0001 control KO --mask True --outpath /home/tt920/HiTwinFormer/model_outputs/ctcf_final/ --epoch_enforced_training 10 --batch_size 8 --loss supcon --n_aug 2 --experiment_name D4_CTCF_new --optimiser Adam --patience 3 --use_wandb
+
+python main_final.py SLeNet D4_CTCF_224.json 0.0001 control KO --mask True --outpath /home/tt920/HiTwinFormer/model_outputs/ctcf_final/ --epoch_enforced_training 10 --batch_size 4 --loss supcon --n_aug 2 --experiment_name D4_CTCF_new --optimiser Adam --patience 3 --use_wandb
 
 conda deactivate
