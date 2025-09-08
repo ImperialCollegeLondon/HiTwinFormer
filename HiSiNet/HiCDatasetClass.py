@@ -33,7 +33,7 @@ class HiCDataset(Dataset):
         stride: Number of tiles which overlap.
         """
         self.reference, self.data_res, self.resolution, self.stride_length,  self.pixel_size = reference, data_res, resolution, int(resolution/stride), int(resolution/data_res)
-        self.metadata = {'filename': metadata[0], 'replicate': metadata[1], 'norm': metadata[2], 'type_of_bin': metadata[3], 'class_id': metadata[4], 'chromosomes': OrderedDict()}
+        self.metadata = {'filename': metadata[0], 'replicate': metadata[1], 'norm': metadata[2], 'type_of_bin': metadata[3], 'class_id': metadata[4], "type_of_data": metadata[5] , 'chromosomes': OrderedDict()}
         self.positions = []
         self.chrom_pos = []
         self.exclude_chroms = exclude_chroms +['All', 'ALL', 'all'] 
@@ -465,7 +465,7 @@ class PairOfDatasets(SiameseHiCDataset):
                     feature_list.append(torch.zeros((1, H, H), device=self.device))
     
                 # ---- Saliency maps (if available) ----
-                if self.compute_sal and ci != cj:
+                if self.compute_sal:
                     s_map = self.integrated_gradients(
                         mi.unsqueeze(0), mj.unsqueeze(0), n_steps=100
                     )
@@ -502,13 +502,13 @@ class PairOfDatasets(SiameseHiCDataset):
         grouped = {
             "replicate"          : np.zeros(dims_feat),
             "conditions"         : np.zeros(dims_feat),
-            #"saliency_replicate" : np.zeros(dims_sal),
+            "saliency_replicate" : np.zeros(dims_sal),
             "saliency_conditions": np.zeros(dims_sal),
         }
         norms = {
             "replicate"          : np.zeros(dims_feat),
             "conditions"         : np.zeros(dims_feat),
-            #"saliency_replicate" : np.zeros(dims_sal),
+            "saliency_replicate" : np.zeros(dims_sal),
             "saliency_conditions": np.zeros(dims_sal),
         }
     

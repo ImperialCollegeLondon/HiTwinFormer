@@ -13,6 +13,12 @@ test_chroms = ['2', 'chr2']
 val_chroms = ['18', 'chr18']
 resolution = 10000
 tile_size = 224
+normalisation_method = "KR" # normalization method: NONE, VC, VC_SQRT, KR, SCALE
+type_of_data = "oe" # could be observed, or oe
+
+dataset_name="D4_CTCF_observed_expected"
+control_group_name="control"
+treatment_group_name="KO"
 
 exclude_for_train = default_exclude + [c for c in test_chroms + val_chroms]
 exclude_for_test = default_exclude + [c for c in all_chroms if c not in test_chroms]
@@ -20,7 +26,7 @@ exclude_for_val = default_exclude + [c for c in all_chroms if c not in val_chrom
 
 # Define your data (remember they all need to have a consistent order)
 replicate_ids = ["R1", "R2", "R3", "R4"] # define which replicate
-condition_ids = [0, 0, 1, 1]  # KO=1, control=0
+condition_ids = [0, 0, 1, 1]  # treatment=1, control=0. make sure the control files are always 0 and treatment always 1 
 input_data_files = [
     "/home/tt920/mnt/network/lymphdev/Tim/GSM4386026_hic_d4_ctl_rep1.hic", 
     "/home/tt920/mnt/network/lymphdev/Tim/GSM4386027_hic_d4_ctl_rep2.hic",
@@ -28,23 +34,24 @@ input_data_files = [
     "/home/tt920/mnt/network/lymphdev/Tim/GSM4386029_hic_d4_aux_rep2.hic"
 ]
 output_data_folder = "/home/tt920/mnt/scratch/tt920/mlhic/"
-json_file_name = f"D4_CTCF_{tile_size}.json" # where the input paths for the ML model are saved
+json_file_name = f"{dataset_name}_{tile_size}.json" # where the input paths for the ML model are saved
 
 # Prepare output structure
 json_dict = {
-    "control": {
+    control_group_name: {
         "reference": reference_genome_index,
         "training": [],
         "validation": [],
         "test": []
     },
-    "KO": {
+    treatment_group_name: {
         "reference": reference_genome_index,
         "training": [],
         "validation": [],
         "test": []
     }
 }
+
 
 for i in range(len(input_data_files)):
     input_file = input_data_files[i]
@@ -54,12 +61,23 @@ for i in range(len(input_data_files)):
     # Construct base name
     base_name = os.path.splitext(os.path.basename(input_file))[0]
     
-    # Prepare base arguments
-    base_args = ([input_file, replicate, 'KR', 'BP', class_id], resolution, tile_size * resolution)
+    # Prepare metadata explicitly (instead of only args)
+    metadata = [
+        input_file, # filename 
+        replicate, # replicate id
+        normalisation_method,
+        "BP", # unit for bases
+        class_id, # control or treatment
+        type_of_data # oberseved or observed vs expected
+    ]
+    
+    # Base arguments for HiCDatasetDec
+    base_args = (metadata, resolution, tile_size * resolution)
 
     all_out = os.path.join(output_data_folder, f"all_{base_name}_chr.mlhic")
     all_ds = HiCDatasetDec(*base_args, exclude_chroms=default_exclude)
     all_ds.save(all_out)
+
     # Save train
     train_out = os.path.join(output_data_folder, f"train_{base_name}.mlhic")
     train = HiCDatasetDec(*base_args, exclude_chroms=exclude_for_train)
@@ -76,11 +94,11 @@ for i in range(len(input_data_files)):
     val.save(val_out)
 
     # Add to json dict
-    key = "KO" if class_id == 1 else "control" # This is where we use
+    key = treatment_group_name if class_id == 1 else control_group_name
     json_dict[key]["training"].append(train_out)
     json_dict[key]["validation"].append(val_out)
     json_dict[key]["test"].append(test_out)
-
+    
 # Save json
 with open(json_file_name, "w") as f:
     json.dump(json_dict, f, indent=2)
