@@ -14,9 +14,9 @@ val_chroms = ['18', 'chr18']
 resolution = 10000
 tile_size = 224
 normalisation_method = "KR" # normalization method: NONE, VC, VC_SQRT, KR, SCALE
-type_of_data = "oe" # could be observed, or oe
+type_of_data = "observed" # could be observed, or oe
 
-dataset_name="D4_CTCF_observed_expected"
+dataset_name="D4_CTCF"
 control_group_name="control"
 treatment_group_name="KO"
 
@@ -42,13 +42,15 @@ json_dict = {
         "reference": reference_genome_index,
         "training": [],
         "validation": [],
-        "test": []
+        "test": [],
+        "all": []
     },
     treatment_group_name: {
         "reference": reference_genome_index,
         "training": [],
         "validation": [],
-        "test": []
+        "test": [],
+        "all": []
     }
 }
 
@@ -98,6 +100,7 @@ for i in range(len(input_data_files)):
     json_dict[key]["training"].append(train_out)
     json_dict[key]["validation"].append(val_out)
     json_dict[key]["test"].append(test_out)
+    json_dict[key]["all"].append(all_out)
     
 # Save json
 with open(json_file_name, "w") as f:

@@ -17,6 +17,7 @@ from itertools import combinations
 import random
 import torch.nn.functional as F
 
+
 class HiCDataset(Dataset):
     """Hi-C dataset base class"""
     def __init__(self, metadata, data_res, resolution, stride=8, exclude_chroms=['chrY','chrX', 'Y', 'X', 'chrM', 'M'], reference = 'mm9'):
@@ -344,7 +345,7 @@ class PairOfDatasets(SiameseHiCDataset):
         model,
         diagonal_off=3,
         compute_saliency=False,
-        distance_measure="pairwise",  # <-- NEW
+        distance_measure="pairwise",  # or cosine
         device=None,
         **kwargs
     ):
@@ -435,47 +436,65 @@ class PairOfDatasets(SiameseHiCDataset):
         ).astype(float)
         diag_mask = torch.from_numpy(band).float().to(self.device)
     
-        for i, (img_i, ci) in enumerate(curr_data):
-            for j, (img_j, cj) in enumerate(curr_data[i + 1:], start=i + 1):
-                
-                mi = img_i.to(self.device)
-                mj = img_j.to(self.device)
+        # --- Prepare hook for features[-2] ---
+        activation = {}
+        def get_activation(name):
+            def hook(model, inp, out):
+                activation[name] = out.detach()
+            return hook
     
-                if mi.max() > 0:
-                    mi = mi / mi.max()
-                if mj.max() > 0:
-                    mj = mj / mj.max()
+        hook = self.model.features[-2].register_forward_hook(get_activation('feat'))
     
-                # ---- Apply diagonal mask ----
-                mi = mi * diag_mask
-                mj = mj * diag_mask
+        self.model.eval()
+        with torch.no_grad():
+            for i, (img_i, ci) in enumerate(curr_data):
+                for j, (img_j, cj) in enumerate(curr_data[i + 1:], start=i + 1):
     
-                # ---- Feature maps (if available) ----
-                if hasattr(self.model, "features"):
-                    fi = self.model.features(mi.unsqueeze(0)).abs()
-                    fj = self.model.features(mj.unsqueeze(0)).abs()
+                    mi = img_i.to(self.device)
+                    mj = img_j.to(self.device)
     
-                    if ci != cj:
-                        diff = fi - fj if (ci == 1 and cj == 0) else fj - fi
+                    if mi.max() > 0:
+                        mi = mi / mi.max()
+                    if mj.max() > 0:
+                        mj = mj / mj.max()
+    
+                    # ---- Apply diagonal mask ----
+                    mi = mi * diag_mask
+                    mj = mj * diag_mask
+    
+                    # ---- Feature maps from features[-2] ----
+                    if hasattr(self.model, "features"):
+                        _ = self.model.forward_one(mi.unsqueeze(0))
+                        fi = activation['feat'].squeeze(0).abs()   # (nfilter, H, W)
+                        _ = self.model.forward_one(mj.unsqueeze(0))
+                        fj = activation['feat'].squeeze(0).abs()
+                    
+                        if ci != cj:
+                            diff = fi - fj if (ci == 1 and cj == 0) else fj - fi
+                        else:
+                            diff = fi - fj
+                    
+                        # collapse filters here → average over filter dimension
+                        diff_mean = diff.mean(dim=0)   # (H, W)
+                    
+                        feature_list.append(diff_mean)  # save averaged feature map
                     else:
-                        diff = fi - fj
+                        feature_list.append(torch.zeros((H, H), device=self.device))
     
-                    feature_list.append(diff)  # keep on GPU
-                else:
-                    feature_list.append(torch.zeros((1, H, H), device=self.device))
+                    # ---- Saliency maps (if available) ----
+                    if self.compute_sal:
+                        s_map = self.integrated_gradients(
+                            mi.unsqueeze(0), mj.unsqueeze(0), n_steps=100
+                        )
+                        saliency_list.append(s_map)  # keep on GPU
+                    else:
+                        pass
     
-                # ---- Saliency maps (if available) ----
-                if self.compute_sal:
-                    s_map = self.integrated_gradients(
-                        mi.unsqueeze(0), mj.unsqueeze(0), n_steps=100
-                    )
-                    saliency_list.append(s_map)  # keep on GPU
-                else:
-                    #saliency_list.append(torch.zeros((H, H), device=self.device))
-                    pass
+        # --- remove hook once finished ---
+        hook.remove()
     
         # Move everything to CPU / numpy **once** after loop
-        feature_cpu = [f.detach().cpu().numpy()[0] for f in feature_list]
+        feature_cpu = [f.detach().cpu().numpy() for f in feature_list]
         saliency_cpu = [s.detach().cpu().numpy() for s in saliency_list]
     
         L = len(feature_cpu)
@@ -489,52 +508,44 @@ class PairOfDatasets(SiameseHiCDataset):
 
     def make_maps_combined(self, chromosome):
         print(f"Started creating differential feature map for {chromosome}")
-        nfilter = self.model.features[-2].out_channels
         chrom_i, chrom_j = self.chromosomes[chromosome]
         if chrom_i == chrom_j:
             return None
-    
+        
         length    = int((self.positions[chrom_i] + self.resolution) / self.data_res)
-        dims_feat = (nfilter, self.pixel_size, length)
+        dims_feat = (self.pixel_size, length)
         dims_sal  = (self.pixel_size, length)
-    
-        # allocate both accumulators and norms
+        
+        # allocate accumulators
         grouped = {
             "replicate"          : np.zeros(dims_feat),
             "conditions"         : np.zeros(dims_feat),
             "saliency_replicate" : np.zeros(dims_sal),
             "saliency_conditions": np.zeros(dims_sal),
         }
-        norms = {
-            "replicate"          : np.zeros(dims_feat),
-            "conditions"         : np.zeros(dims_feat),
-            "saliency_replicate" : np.zeros(dims_sal),
-            "saliency_conditions": np.zeros(dims_sal),
-        }
-    
+        norms = {k: np.zeros_like(v) for k, v in grouped.items()}
+        
         for idx in range(chrom_j, chrom_i, -1):
             true    = idx - 1
             pair    = self.labels[true]
             pos_bin = int(self.positions[true] / self.data_res)
-    
+        
             typ = ("replicate"
                    if self.metadata[pair[0]]["class_id"]
                       == self.metadata[pair[1]]["class_id"]
                    else "conditions")
-    
-            # feature maps
-            for f in range(nfilter):
-                x = self.data[true][f]
-                x = (x + x.T) / 2
-                rot_feat = ndimage.rotate(x, 45, reshape=True)
-                small_f  = resize(rot_feat,
-                                  (self.pixel_size, self.pixel_size),
-                                  preserve_range=True,
-                                  anti_aliasing=False)
-                grouped[typ][f, :, pos_bin:pos_bin+self.pixel_size] += small_f
-                norms[typ][f, :, pos_bin:pos_bin+self.pixel_size]   += 1
-    
-            # saliency maps
+        
+            x = self.data[true]
+            x = (x + x.T) / 2
+            rot_feat = ndimage.rotate(x, 45, reshape=True)
+            small_f  = resize(rot_feat,
+                              (self.pixel_size, self.pixel_size),
+                              preserve_range=True,
+                              anti_aliasing=False)
+            grouped[typ][:, pos_bin:pos_bin+self.pixel_size] += small_f
+            norms[typ][:, pos_bin:pos_bin+self.pixel_size]   += 1
+        
+            # saliency maps stay unchanged
             if self.compute_sal:
                 s = self.saliency[true]
                 H, W = s.shape
@@ -552,28 +563,25 @@ class PairOfDatasets(SiameseHiCDataset):
                 sal_key = f"saliency_{typ}"
                 grouped[sal_key][:, pos_bin:pos_bin+self.pixel_size] += small_s
                 norms[sal_key][:, pos_bin:pos_bin+self.pixel_size]   += 1
-    
-        # normalize element-wise
+        
+        # normalize
         for k in grouped:
             with np.errstate(divide='ignore', invalid='ignore'):
                 grouped[k] = np.where(norms[k] > 0, grouped[k] / norms[k], 0.0)
-    
+        
         print(f"created grouped map for {chromosome}", flush=True)
         return grouped
 
-    def extract_features(self, chromosome, nfilter, pair, qthresh=0.999, min_length=10, max_length=256, min_width=10,max_width=256, pad_extra=3, im_size=20):
-        if nfilter=="all": curr_map = np.concatenate([np.sum(value[pair][:,:int(self.pixel_size/2),:],axis=0) for chrom, value in self.paired_maps.items() 
-                            if value is not None ], axis=1) # create a global paired map for thresholding
-        else: curr_map = np.concatenate([value[pair][nfilter,:int(self.pixel_size/2),:] for chrom, value in self.paired_maps.items() 
-                            if value is not None ], axis=1)
+
+    def extract_features(self, chromosome, pair, qthresh=0.999, min_length=10, max_length=256, min_width=10,max_width=256, pad_extra=3, im_size=20):
+        curr_map = np.concatenate([value[pair][:int(self.pixel_size/2), :] for chrom, value in self.paired_maps.items() if value is not None], axis=1) # get global map
         band = np.ones_like(curr_map, dtype=bool)
         band[-pad_extra:, :] = False  # Mask out the bottom 3 rows
         curr_map = np.where(band, curr_map, np.nan)
         pos_thresh = np.max([np.nanquantile(curr_map, qthresh),-np.nanquantile(curr_map, 1-qthresh)])
         neg_thresh = np.min([-np.nanquantile(curr_map, qthresh),np.nanquantile(curr_map, 1-qthresh)]) # calculate global intensity threshold
 
-        if nfilter=="all": curr_map=np.sum(self.paired_maps[chromosome][pair][:,int(self.pixel_size/2):,:],axis=0)
-        else: curr_map=self.paired_maps[chromosome][pair][nfilter,int(self.pixel_size/2):,:]
+        curr_map = self.paired_maps[chromosome][pair][int(self.pixel_size/2):, :]
         band = np.ones_like(curr_map, dtype=bool)
         band[-pad_extra:, :] = False
         curr_map = np.where(band, curr_map, np.nan)

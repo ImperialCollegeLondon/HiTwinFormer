@@ -366,7 +366,7 @@ def plot_chromosome_distances_middle_bin(
         
             sns.lineplot(x="Middle_Mb", y="delta_dist", data=mean_df, color="black", ax=ax_diff)
             ax_diff.set_ylim(bottom=0)
-            ax_diff.set_xlim(mean_df["Start_Mb"].min(), mean_df["Start_Mb"].max())  # << fix
+            ax_diff.set_xlim(mean_df["Middle_Mb"].min(), mean_df["Middle_Mb"].max())  # << fix
             if major_tick_interval is not None:
                 ax_diff.xaxis.set_major_locator(MultipleLocator(major_tick_interval))
             ax_diff.set_xlabel("Position (Mb)", fontsize=font_size)
@@ -1122,13 +1122,12 @@ def plot_hic_cnn_features(
             if all_maps is None:
                 raise ValueError(f"No paired maps found for chromosome {chromosome_num}")
             cond_map = all_maps["conditions"]
-            cond_sum = np.nansum(cond_map, axis=0)
             if bin_end is None: 
-                bin_end = cond_sum.shape[1]
+                bin_end = cond_map.shape[1]
             if row_end is None: 
-                row_end = cond_sum.shape[0]
-            half_row = cond_sum.shape[0] // 2
-            return cond_sum[half_row:row_end, bin_start:bin_end]
+                row_end = cond_map.shape[0]
+            half_row = cond_map.shape[0] // 2
+            return cond_map[half_row:row_end, bin_start:bin_end]
         
         def extract_saliency_conditions_map(paired_maps, chromosome_num, bin_start=0, bin_end=None, row_end=None):
             """Extract saliency conditions map"""
@@ -1466,8 +1465,8 @@ def plot_hic_cnn_features(
         grouped = paired_maps.get(chromosome_num, None)
         if grouped is None:
             raise RuntimeError(f"No CNN maps for chromosome {chromosome_num}")
-        rep_map = grouped["replicate"]
-        canvas_bins = len(rep_map[0][0])
+        conditions = grouped["conditions"]
+        canvas_bins = len(conditions[0])
         canvas = np.zeros((pixel_size, canvas_bins), dtype=np.float32)
         
         for feat in features:

@@ -90,7 +90,7 @@ class SLeNet(SiameseNet):
         x = x.view(x.size(0), -1)
         x = self.linear(x)
 
-        # only for SupCon / SINCERELoss and triplet
+        # only for SupCon / SINCERELoss
         if self.supcon:
             x = F.normalize(x, p=2, dim=1)
 

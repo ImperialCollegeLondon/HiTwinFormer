@@ -85,12 +85,14 @@ python make_feature_map.py --model_name SLeNet --model_file /home/tt920/HiTwinFo
 
 5. **Calculate embedding distances**
 
-Run `distance_calculation_all_stats_original_version_middle.py` to generate csv's with embedding distances to simplify downstream analysis.
+You can run it on:  
+- One model checkpoint → use `--mlhic_dataset_path`  
+- A directory of checkpoints → use `--model_ckpt_dir` 
 
 Example command line script: 
 
 ```bash
-python distance_calculation_all_stats_original_version_middle.py --mlhic_dataset_path ctcf_224.json --model_ckpt_dir model_outputs/ctcf_final/maxvit_multi/contrastive/ --output_dir distances/ctcf/ --model_name SMaxVit --reference_genome mm10 --bin_size 10000 --patch_len 224 
+python distance_calculation.py --mlhic_dataset_path D4_CTCF_224.json --model_ckpt_dir model_outputs/ctcf_final/maxvit_multi/contrastive/ --output_dir distances/ctcf/ --model_name SMaxVit --reference_genome mm10 --bin_size 10000 --patch_len 224 
 ```
 5. **Analyse results**
 
